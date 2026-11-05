@@ -15,7 +15,7 @@ router = APIRouter(tags=["chat"])
 MAX_TITLE_LENGTH = 80
 
 
-def _require_searchable(repo: Repo) -> None:
+def require_searchable(repo: Repo) -> None:
     """Raise a 409 unless the repo is indexed, with the embedding model in use now."""
     if repo.status != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Repo isn't ready to answer questions (status: {repo.status}).")
@@ -34,7 +34,7 @@ def ask(repo_id: int, body: AskRequest, db: Session = Depends(get_db)) -> Stream
     repo = db.get(Repo, repo_id)
     if repo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Repo not found.")
-    _require_searchable(repo)
+    require_searchable(repo)
 
     if body.conversation_id is None:
         conversation = Conversation(repo_id=repo_id, title=body.question[:MAX_TITLE_LENGTH])

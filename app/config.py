@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     # SecretStr keeps the key out of logs and tracebacks.
     google_api_key: SecretStr = SecretStr("")
     chat_model: str = ""
+    # How much the chat model reasons before answering. default sends nothing, leaving it to the model.
+    chat_thinking_level: Literal["default", "minimal", "low", "medium", "high"] = "minimal"
     embedding_provider: Literal["gemini", "local", "fake"] = "local"
     # Empty means the default local model. Gemini requires a value.
     embedding_model: str = ""

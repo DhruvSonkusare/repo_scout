@@ -7,7 +7,7 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +17,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
+from langchain_core.language_models import FakeListChatModel
+from langchain_core.messages import BaseMessage
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -42,6 +44,7 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.ingest import remove_clone  # noqa: E402
+from app.llm import FAKE_CHAT_RESPONSES  # noqa: E402
 
 SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
@@ -114,6 +117,29 @@ def recorded_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     sleeps: list[float] = []
     monkeypatch.setattr(time, "sleep", sleeps.append)
     return sleeps
+
+
+class RecordingChatModel(FakeListChatModel):
+    """A fake chat model that records every prompt it receives."""
+
+    prompts: list[list[BaseMessage]] = []
+
+    def _call(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> str:
+        self.prompts.append(messages)
+        return super()._call(messages, *args, **kwargs)
+
+    async def _astream(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        self.prompts.append(messages)
+        async for chunk in super()._astream(messages, *args, **kwargs):
+            yield chunk
+
+
+@pytest.fixture
+def recording_model(monkeypatch: pytest.MonkeyPatch) -> RecordingChatModel:
+    """Replace the chat model used for answers and guides."""
+    model = RecordingChatModel(responses=[FAKE_CHAT_RESPONSES[0]], prompts=[])
+    monkeypatch.setattr("app.rag.get_chat_model", lambda: model)
+    return model
 
 
 _cached_ssl_context = lru_cache(maxsize=None)(ssl.create_default_context)

@@ -38,6 +38,7 @@ GEMINI_ERROR_MESSAGES = {
     429: "Gemini's rate limit or quota was reached. Wait a minute and try again.",
 }
 GEMINI_BUSY_MESSAGE = "Gemini is busy right now. Try again shortly, or use a different CHAT_MODEL."
+GEMINI_DAILY_QUOTA_MESSAGE = "Gemini's daily quota for this model is used up. Use a different model, or try again tomorrow."
 
 
 def _api_error(error: Exception) -> APIError | None:
@@ -94,6 +95,8 @@ def gemini_retry_delay(error: Exception, default_seconds: float) -> float | None
 def describe_gemini_error(error: Exception) -> str:
     """Turn a Gemini or network error into a short message."""
     api_error = _api_error(error)
+    if is_daily_quota_error(error):
+        return f"{GEMINI_DAILY_QUOTA_MESSAGE} (HTTP {api_error.code})"
     if api_error is not None:
         if api_error.code >= 500:
             return f"{GEMINI_BUSY_MESSAGE} (HTTP {api_error.code})"
@@ -127,6 +130,10 @@ def get_chat_model() -> BaseChatModel:
     if settings.llm_provider == "fake":
         # FakeListChatModel replies with these strings in turn and never touches the network.
         return FakeListChatModel(responses=FAKE_CHAT_RESPONSES)
+    # Gemini 3 models "think" before writing, and the user sees nothing until that ends. Answers
+    # here come from excerpts we supply, so they need little of it, and less thinking means a
+    # faster first token. Older Gemini models reject this option: use CHAT_THINKING_LEVEL=default.
+    thinking = {} if settings.chat_thinking_level == "default" else {"thinking_level": settings.chat_thinking_level}
     return ChatGoogleGenerativeAI(
         model=_require_gemini_setting(settings.chat_model, "CHAT_MODEL"),
         google_api_key=_gemini_api_key(settings),
@@ -134,6 +141,7 @@ def get_chat_model() -> BaseChatModel:
         # Despite its name, this counts every attempt including the first, and 0 means "use
         # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
         max_retries=settings.max_retries + 1,
+        **thinking,
     )
 
 

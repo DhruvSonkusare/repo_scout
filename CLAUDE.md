@@ -28,9 +28,10 @@ tests and a good README matter as much as features.
   1,000 texts a day is too low to index most repos.
 - Local embeddings use `EMBEDDING_DEVICE` (`auto` | `cuda` | `cpu`). `requirements.txt` is the CPU build, for
   Docker and machines without a GPU. `requirements-gpu.txt` adds CUDA through `fastembed-gpu`. The two builds
-  conflict, so a venv has one or the other. Installing the GPU build takes the three commands at the top of
-  that file, because `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU
-  with a log line.
+  conflict, so a venv has one or the other. Install the GPU build with `scripts/install_gpu.ps1`, because
+  `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU with a log line.
+- `CHAT_THINKING_LEVEL` (`default` | `minimal` | `low` | `medium` | `high`, default `minimal`) sets how much
+  Gemini reasons before answering. `default` sends nothing, which older models need.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI

@@ -288,6 +288,32 @@ def test_gemini_chat_model_uses_settings() -> None:
     assert model.max_retries == get_settings().max_retries + 1
 
 
+def test_minimal_is_the_default_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CHAT_THINKING_LEVEL", raising=False)
+
+    assert Settings(_env_file=None).chat_thinking_level == "minimal"
+
+
+@pytest.mark.parametrize("level", ["minimal", "low", "medium", "high"])
+def test_thinking_level_setting_reaches_the_chat_model(gemini_env: pytest.MonkeyPatch, level: str) -> None:
+    gemini_env.setenv("CHAT_THINKING_LEVEL", level)
+
+    assert get_chat_model().thinking_level == level
+
+
+def test_default_thinking_level_sends_nothing(gemini_env: pytest.MonkeyPatch) -> None:
+    gemini_env.setenv("CHAT_THINKING_LEVEL", "default")
+
+    assert get_chat_model().thinking_level is None
+
+
+def test_thinking_level_rejects_unknown_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHAT_THINKING_LEVEL", "extreme")
+
+    with pytest.raises(ValueError, match="chat_thinking_level"):
+        Settings(_env_file=None)
+
+
 @pytest.mark.usefixtures("gemini_env")
 def test_gemini_embeddings_use_settings() -> None:
     embeddings = get_embeddings()

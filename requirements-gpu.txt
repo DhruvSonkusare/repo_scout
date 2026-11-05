@@ -1,15 +1,12 @@
 # NVIDIA GPU install: local embeddings run on CUDA. The extras bring the CUDA and cuDNN DLLs (about 2 GB).
 #
-# pip can't do this in one step. chromadb requires the CPU onnxruntime, which shares a folder with
-# onnxruntime-gpu and overwrites it, so embeddings would silently stay on the CPU. Run all three, after
-# `pip uninstall -y fastembed onnxruntime` if the venv already has the CPU build (stop the server first):
+# Don't install this file directly. Stop the server, then run:
+#   powershell -ExecutionPolicy Bypass -File scripts\install_gpu.ps1
 #
-#   pip install -r requirements-gpu.txt
-#   pip uninstall -y onnxruntime onnxruntime-gpu
-#   pip install --no-deps onnxruntime-gpu
-#
-# Afterwards, `pip check` reports "chromadb requires onnxruntime, which is not installed". That's expected:
-# onnxruntime-gpu provides the same module. Repeat the last two lines after any install that brings it back.
+# pip can't do this in one step: chromadb requires the CPU onnxruntime, which shares a folder with
+# onnxruntime-gpu and overwrites it, so embeddings would silently stay on the CPU. Afterwards, `pip check`
+# reports "chromadb requires onnxruntime, which is not installed". That's expected: onnxruntime-gpu provides
+# the same module. Run the script again after any install that brings the CPU build back.
 -r requirements-base.txt
 fastembed-gpu
 onnxruntime-gpu[cuda,cudnn]

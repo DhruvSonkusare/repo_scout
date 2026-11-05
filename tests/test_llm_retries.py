@@ -5,7 +5,7 @@ The fake_gemini fixture patches out sleeping, so backoff is checked without any 
 
 import pytest
 
-from app.llm import gemini_retry_delay, get_chat_model, get_embeddings
+from app.llm import describe_gemini_error, gemini_retry_delay, get_chat_model, get_embeddings
 from scripts.smoke_llm import main as smoke_main
 from tests.conftest import FakeGemini
 
@@ -92,6 +92,17 @@ def test_retry_delay_defaults_and_permanent_errors(
     fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, status: int, expected: float | None
 ) -> None:
     assert gemini_retry_delay(embedding_error(fake_gemini, monkeypatch, status), 60) == expected
+
+
+def test_daily_quota_message_says_it_is_daily(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_gemini.error_details = [
+        {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}],
+        }
+    ]
+
+    assert "daily quota" in describe_gemini_error(embedding_error(fake_gemini, monkeypatch, 429))
 
 
 def test_smoke_script_prints_results_on_success(fake_gemini: FakeGemini, capsys: pytest.CaptureFixture[str]) -> None:

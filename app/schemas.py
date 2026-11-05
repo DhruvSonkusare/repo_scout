@@ -38,6 +38,13 @@ class RepoFileOut(BaseModel):
     content: str
 
 
+class GuideOut(BaseModel):
+    """A repo's onboarding guide, in Markdown."""
+
+    repo_id: int
+    guide: str
+
+
 class AskRequest(BaseModel):
     """A question about a repo. Leave out conversation_id to start a new conversation."""
 

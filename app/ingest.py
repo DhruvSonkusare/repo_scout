@@ -359,6 +359,7 @@ def _run_indexing(db: Session, repo: Repo) -> None:
     repo.file_count = repo.chunk_count = repo.chunks_embedded = 0
     repo.languages = {}
     repo.embedding_provider = repo.embedding_model = None
+    repo.onboarding_guide = None  # it described the old clone
     db.commit()
 
     root = clone_repo(repo.url, repo.id)

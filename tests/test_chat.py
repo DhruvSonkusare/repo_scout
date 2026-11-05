@@ -5,46 +5,25 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
+
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.documents import Document
 from langchain_core.language_models import FakeListChatModel
-from langchain_core.messages import BaseMessage
 from sqlalchemy.orm import Session
 
 from app.db import Conversation, Message, Repo
 from app.llm import FAKE_CHAT_RESPONSES
 from app.main import app
 from app.rag import format_docs, retrieve
-from tests.conftest import FakeGemini
+from tests.conftest import FakeGemini, RecordingChatModel
 
 pytestmark = pytest.mark.usefixtures("fresh_settings", "cloned_urls")
 
 client = TestClient(app)
 ANSWER = FAKE_CHAT_RESPONSES[0]
-
-
-class RecordingChatModel(FakeListChatModel):
-    """A fake chat model that records every prompt it receives."""
-
-    prompts: list[list[BaseMessage]] = []
-
-    def _call(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> str:
-        self.prompts.append(messages)
-        return super()._call(messages, *args, **kwargs)
-
-    async def _astream(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        self.prompts.append(messages)
-        async for chunk in super()._astream(messages, *args, **kwargs):
-            yield chunk
-
-
-@pytest.fixture
-def recording_model(monkeypatch: pytest.MonkeyPatch) -> RecordingChatModel:
-    """Replace the chat model, with a condensed question as its first reply when there is history."""
-    model = RecordingChatModel(responses=[ANSWER], prompts=[])
-    monkeypatch.setattr("app.rag.get_chat_model", lambda: model)
-    return model
 
 
 @pytest.fixture
@@ -106,10 +85,31 @@ def test_ask_saves_both_messages(repo_id: int, db_session: Session) -> None:
     assert messages[0]["sources"] == []
 
 
+def test_empty_tokens_are_not_sent(repo_id: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    class ModelWithEmptyChunks(FakeListChatModel):
+        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+            for text in ["", "Hello", "", " world", ""]:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+    monkeypatch.setattr("app.rag.get_chat_model", lambda: ModelWithEmptyChunks(responses=["unused"]))
+
+    events = ask(repo_id)
+
+    tokens = [event["text"] for event in events if event["type"] == "token"]
+    assert tokens == ["Hello", " world"]
+    assert events[-1]["type"] == "done"
+
+
+def test_first_question_skips_the_condense_call(repo_id: int, recording_model: RecordingChatModel) -> None:
+    ask(repo_id, "What does greet do?")
+
+    assert len(recording_model.prompts) == 1
+    assert "standalone" not in recording_model.prompts[0][0].content
+
+
 def test_excerpts_and_question_reach_the_model(repo_id: int, recording_model: RecordingChatModel) -> None:
     ask(repo_id, "What does greet do?")
 
-    assert len(recording_model.prompts) == 1  # a first question skips the condense call
     system, question = recording_model.prompts[0][0], recording_model.prompts[0][-1]
     assert "[1] " in system.content
     assert "def greet" in system.content
