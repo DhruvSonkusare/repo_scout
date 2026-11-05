@@ -23,7 +23,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 | `conversations` | id, repo_id → repos, title, created_at |
 | `messages` | id, conversation_id → conversations, role (`user/ai`), content, sources (JSONB list), created_at |
 | `searches` | id, problem (text), plan (JSONB: queries/language/must_have), created_at |
-| `search_results` | id, search_id → searches, full_name, url, description, stars, language, last_pushed, score (0–100), why_it_fits, caveats, how_to_start (JSONB list of strings), repo_id → repos (nullable, set when indexed), problem_guide (text, nullable) |
+| `search_results` | id, search_id → searches, full_name, url, description, stars, language, last_pushed, score (0–100, NULL if not assessed), why_it_fits, caveats, how_to_start (JSONB list of strings), repo_id → repos (nullable, set when indexed), problem_guide (text, nullable) |
 
 ## Reference: API
 
@@ -253,18 +253,21 @@ and the 15–20 README fetches per search count against a limit of 60 API reques
 ### Step 9: Query planner + reranker chains ⭐
 **Prompt**
 > Implement `app/finder/chains.py`:
-> - Pydantic `SearchPlan` (queries: list[str] 2–3 short GitHub-style keyword queries,
->   language: str | None, must_have: list[str]) and a PLANNER_PROMPT that turns a plain-English
->   problem into it. Use `get_structured_model(SearchPlan)`.
+> - Pydantic `SearchPlan` (subject: the problem's core noun; queries: list[str] 2–3 short GitHub-style
+>   keyword queries that all contain the subject, which code enforces; language: str | None,
+>   must_have: list[str]) and a PLANNER_PROMPT that turns a plain-English problem into it. Use
+>   `get_structured_model(SearchPlan)`.
 > - `find_repos(problem)`: run the plan, call `search_repos` for each query concurrently
->   (`asyncio.gather`), dedupe by full_name, drop repos not pushed in the last 3 years,
->   take the top 15–20 deduplicated candidates, fetch their READMEs concurrently and trim each to
->   ~1500 chars for the reranker.
+>   (`asyncio.gather`), dedupe by full_name, drop repos not pushed in the last 3 years. With fewer than
+>   8 candidates, run one broader search for the subject alone. Take the top 15–20 deduplicated
+>   candidates, fetch their READMEs concurrently and trim each to ~1500 chars for the reranker.
 > - Pydantic `RepoAssessment` (full_name, score 0–100, why_it_fits, caveats, how_to_start: 2–4
 >   short steps) and `Ranking(results: list[RepoAssessment])`; a RERANK_PROMPT that judges
 >   each candidate (description + topics + README excerpt) AGAINST THE USER'S PROBLEM, is
 >   honest when nothing fits well, and never invents features not in the README. After the LLM call,
->   drop any assessment whose full_name isn't in the candidate list.
+>   drop any assessment whose full_name isn't in the candidate list. No silent drops: candidates the
+>   model left out get a second, smaller call, and any still missing are saved with score NULL and
+>   marked "not assessed", after the scored results.
 > - Make the fake provider work: when LLM_PROVIDER=fake, return a fixed SearchPlan/Ranking.
 > Then add `app/routers/finder.py`: POST `/api/finder/search {problem}` saves `searches` +
 > `search_results` and returns results sorted by score; GET searches list and detail.
@@ -281,7 +284,8 @@ chains concurrently, and why we rerank instead of trusting GitHub stars.
 > `/api/finder/results/{id}/guide`: requires the repo to be ready; retrieve chunks using the
 > user's original problem statement plus probe queries for install/config/usage examples;
 > PROBLEM_GUIDE_PROMPT writes Markdown in this EXACT structure so the user never loses context:
-> 1. **Your problem**: the user's original problem statement, quoted word for word
+> 1. **Your problem**: the user's original problem statement, quoted word for word (written by our
+>    code, not the model, so it can't be reworded)
 > 2. **Recommended repo**: name, link and a one-line summary of what it does
 > 3. **Does it solve your problem?**: an honest verdict (Fully / Partly / No) with the reason
 > 4. **Setup**: numbered install and config commands taken from the repo

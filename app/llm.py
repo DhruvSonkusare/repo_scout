@@ -1,5 +1,7 @@
 """The only place chat and embedding models are created (gemini or fake)."""
 
+import asyncio
+import contextlib
 import logging
 import math
 import time
@@ -48,6 +50,7 @@ QUOTA_RESET_ZONE = ZoneInfo("America/Los_Angeles")
 # Gemini 2.5 takes a token budget instead of a level. 0 turns thinking off.
 THINKING_BUDGETS = {"minimal": 0, "low": 1024, "medium": 8192, "high": 24576}
 MODEL_LIST_TIMEOUT_MS = 10_000
+CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 class ModelUnavailableError(Exception):
@@ -341,6 +344,11 @@ class _ChainLink(Runnable[LanguageModelInput, Any]):
             yield AIMessageChunk(content="")
 
 
+# Each model holds a Google client with open connections, so keep one per set of options instead of
+# one per request. That saves about 0.5 s per client, and leaves a known list to close at shutdown.
+_gemini_models: dict[tuple[str, int, ThinkingLevel], ChatGoogleGenerativeAI] = {}
+
+
 def _fake_chat_model(name: str) -> BaseChatModel:
     """Return the offline model. FakeListChatModel replies with these strings and never touches the network."""
     return FakeListChatModel(responses=FAKE_CHAT_RESPONSES)
@@ -353,15 +361,29 @@ def _build_chat_model(name: str, is_last: bool, thinking_level: ThinkingLevel) -
         return _fake_chat_model(name)
     # The next model is a faster retry than waiting out a backoff, so only the last one retries.
     retries = settings.max_retries if is_last else 0
-    return ChatGoogleGenerativeAI(
-        model=name,
-        google_api_key=_gemini_api_key(settings),
-        temperature=0.2,
-        # Despite its name, this counts every attempt including the first, and 0 means "use
-        # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
-        max_retries=retries + 1,
-        **_thinking_settings(model_profile(name), thinking_level),
-    )
+    key = (name, retries, thinking_level)
+    if key not in _gemini_models:
+        _gemini_models[key] = ChatGoogleGenerativeAI(
+            model=name,
+            google_api_key=_gemini_api_key(settings),
+            temperature=0.2,
+            # Despite its name, this counts every attempt including the first, and 0 means "use
+            # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
+            max_retries=retries + 1,
+            **_thinking_settings(model_profile(name), thinking_level),
+        )
+    return _gemini_models[key]
+
+
+async def close_models() -> None:
+    """Close every Google client, for server shutdown. A failure or a slow close can't block the exit."""
+    models = list(_gemini_models.values())
+    _gemini_models.clear()
+    for model in models:
+        try:
+            await asyncio.wait_for(model.aclose(), CLIENT_CLOSE_TIMEOUT_SECONDS)
+        except (OSError, RuntimeError, TimeoutError) as error:
+            logger.warning("Couldn't close the client of model %s: %r", model.model, error)
 
 
 # Names that startup didn't find in Gemini's model list, which are left out of every chain.
@@ -379,11 +401,12 @@ def _list_generation_models(api_key: str) -> set[str]:
         api_key=api_key,
         http_options=HttpOptions(timeout=MODEL_LIST_TIMEOUT_MS, retry_options=HttpRetryOptions(attempts=1)),
     )
-    return {
-        (model.name or "").removeprefix("models/")
-        for model in client.models.list(config={"page_size": 1000})
-        if "generateContent" in (model.supported_actions or [])
-    }
+    with contextlib.closing(client):
+        return {
+            (model.name or "").removeprefix("models/")
+            for model in client.models.list(config={"page_size": 1000})
+            if "generateContent" in (model.supported_actions or [])
+        }
 
 
 def validate_model_chains() -> None:

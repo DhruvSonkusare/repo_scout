@@ -110,12 +110,12 @@ class Search(Base):
     plan: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # Best match first. The id keeps equal scores in the order they were saved.
+    # Best match first, then repos the model never assessed. The id keeps equal scores in saved order.
     results: Mapped[list["SearchResult"]] = relationship(
         back_populates="search",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        order_by="(SearchResult.score.desc(), SearchResult.id)",
+        order_by="(SearchResult.score.desc().nulls_last(), SearchResult.id)",
     )
 
 
@@ -132,7 +132,8 @@ class SearchResult(Base):
     stars: Mapped[int] = mapped_column(Integer)
     language: Mapped[str | None] = mapped_column(Text)
     last_pushed: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    score: Mapped[int] = mapped_column(Integer)
+    # NULL means the model never assessed this repo.
+    score: Mapped[int | None] = mapped_column(Integer)
     why_it_fits: Mapped[str] = mapped_column(Text)
     caveats: Mapped[str] = mapped_column(Text)
     how_to_start: Mapped[list[str]] = mapped_column(JSONB)

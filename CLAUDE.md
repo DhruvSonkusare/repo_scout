@@ -37,6 +37,7 @@ tests and a good README matter as much as features.
   user message) and structured output. Answers record their model in `messages.model` and the `done` event.
   Startup checks the names against `models.list` and drops unknown ones with a warning. If a chain ends up empty,
   `/api/health` returns a 503 that names it. If the list can't be fetched, every model stays.
+  Each model and its Google client is built once and reused, and `close_models()` closes them at server shutdown.
 - `CHAT_THINKING_LEVEL` (default `minimal`) and `GUIDE_THINKING_LEVEL` (default `low`) set how much Gemini reasons
   before answering (`default` | `minimal` | `low` | `medium` | `high`): a `thinking_level` for Gemini 3, a
   `thinking_budget` for 2.5, nothing for Gemma. `default` sends nothing.

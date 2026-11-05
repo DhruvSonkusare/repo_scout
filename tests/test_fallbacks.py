@@ -14,6 +14,7 @@ from langchain_core.language_models import FakeListChatModel
 from langchain_core.messages import AIMessageChunk, AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 
 from app.config import Settings
@@ -21,8 +22,10 @@ from app.llm import (
     ModelProfile,
     ModelSetupError,
     ModelUnavailableError,
+    _gemini_models,
     _merge_system_prompt,
     circuit_breaker,
+    close_models,
     describe_gemini_error,
     get_chat_model,
     get_guide_model,
@@ -884,3 +887,59 @@ def test_real_client_structured_output_asks_for_the_schema(
 
     config = request_for(fake_gemini, "gemini-3-flash")["generationConfig"]
     assert config["responseMimeType"] == "application/json"
+
+
+# --- reusing and closing the Google clients
+
+
+def test_a_model_is_built_once_per_set_of_options(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "first")
+
+    assert run_ainvoke(get_chat_model()) == "hello"
+    assert run_ainvoke(get_chat_model()) == "hello"
+
+    assert [key[0] for key in _gemini_models] == ["first"]
+
+
+def test_closing_the_models_closes_their_clients_and_forgets_them(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "first")
+
+    async def use_then_close() -> ChatGoogleGenerativeAI:
+        await get_chat_model().ainvoke("Hi")
+        model = next(iter(_gemini_models.values()))
+        await close_models()
+        return model
+
+    model = asyncio.run(use_then_close())
+
+    assert _gemini_models == {}
+    assert model._client_cleanup._closed
+
+
+def test_a_client_that_cannot_close_does_not_stop_the_others(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "first,second")
+    fake_gemini.statuses_by_model["first"] = 503
+
+    # A client used on one event loop refuses to close on another.
+    assert run_ainvoke(get_chat_model()) == "hello"
+    asyncio.run(close_models())
+
+    assert _gemini_models == {}
+    assert "Couldn't close the client" in caplog.text
+
+
+def test_server_shutdown_closes_the_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed: list[bool] = []
+
+    async def record() -> None:
+        closed.append(True)
+
+    monkeypatch.setattr("app.main.close_models", record)
+
+    with TestClient(app):
+        assert closed == []
+    assert closed == [True]

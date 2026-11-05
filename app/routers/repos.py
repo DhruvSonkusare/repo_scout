@@ -28,21 +28,17 @@ def _require_idle(repo: Repo) -> None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Repo is busy ({repo.status}). Try again when it finishes.")
 
 
-@router.post("", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
-def add_repo(
-    body: RepoCreate, background_tasks: BackgroundTasks, response: Response, db: Session = Depends(get_db)
-) -> Repo:
-    """Add a repo and start indexing it. A repo that was already added is returned as it is."""
+def add_or_get_repo(db: Session, github_url: str) -> tuple[Repo, bool]:
+    """Return the repo for a GitHub URL, adding it if needed, and whether it was just added."""
     try:
-        name = parse_github_url(body.url.strip())
+        name = parse_github_url(github_url.strip())
     except ValueError as error:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
     url = f"https://github.com/{name}"
 
     existing = db.scalar(select(Repo).where(Repo.url == url))
     if existing is not None:
-        response.status_code = status.HTTP_200_OK
-        return existing
+        return existing, False
 
     repo = Repo(url=url, name=name)
     db.add(repo)
@@ -51,9 +47,20 @@ def add_repo(
     except IntegrityError:
         # Another request added the same URL between the check above and this commit.
         db.rollback()
+        return db.scalars(select(Repo).where(Repo.url == url)).one(), False
+    return repo, True
+
+
+@router.post("", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
+def add_repo(
+    body: RepoCreate, background_tasks: BackgroundTasks, response: Response, db: Session = Depends(get_db)
+) -> Repo:
+    """Add a repo and start indexing it. A repo that was already added is returned as it is."""
+    repo, created = add_or_get_repo(db, body.url)
+    if created:
+        background_tasks.add_task(index_repo, repo.id)
+    else:
         response.status_code = status.HTTP_200_OK
-        return db.scalars(select(Repo).where(Repo.url == url)).one()
-    background_tasks.add_task(index_repo, repo.id)
     return repo
 
 

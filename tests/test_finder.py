@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from google.genai.errors import ClientError, ServerError
+from langchain_core.documents import Document
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import FakeListChatModel
 from langchain_core.messages import BaseMessage
@@ -17,11 +18,18 @@ from langchain_core.prompt_values import PromptValue
 from langchain_core.runnables import Runnable, RunnableLambda
 from sqlalchemy.orm import Session
 
-from app.db import Search, SearchResult
+from app.config import get_settings
+from app.db import Repo, Search, SearchResult
 from app.finder.chains import (
     MAX_CANDIDATES,
     MAX_README_CHARS_FOR_RERANK,
+    MAX_README_CHARS_FOR_SECOND_RERANK,
+    MIN_CANDIDATES,
+    NOT_ASSESSED_REASON,
     PLANNER_PROMPT,
+    PROBLEM_EXCERPT_K,
+    PROBLEM_GUIDE_PROBE_K,
+    PROBLEM_GUIDE_PROBES,
     Candidate,
     Ranking,
     RepoAssessment,
@@ -29,11 +37,14 @@ from app.finder.chains import (
     _clean_ranking,
     _format_candidates,
     _merge_candidates,
+    _with_subject,
     find_repos,
     rank_candidates,
 )
 from app.finder.github import GitHubClient, RepoCandidate
+from app.llm import FAKE_CHAT_RESPONSES
 from app.main import app
+from tests.conftest import RecordingChatModel
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
 
@@ -105,8 +116,12 @@ class FakeLLM:
     """Replaces get_structured_model: replies by schema, or raises, and records the prompts."""
 
     def __init__(self) -> None:
-        self.plan = SearchPlan(queries=["pdf table", "tabular pdf"], language=None, must_have=["reads tables"])
+        self.plan = SearchPlan(
+            subject="pdf", queries=["pdf table", "tabular pdf"], language=None, must_have=["reads tables"]
+        )
         self.ranking: Ranking | None = None
+        self.later_rankings: list[Ranking | Exception] = []  # replies to the calls after the first
+        self.ranking_calls = 0
         self.errors: dict[type, Exception] = {}
         self.prompts: dict[type, list[BaseMessage]] = {}
 
@@ -117,6 +132,12 @@ class FakeLLM:
                 raise self.errors[schema]
             if schema is SearchPlan:
                 return self.plan
+            self.ranking_calls += 1
+            if self.ranking_calls > 1 and self.later_rankings:
+                later = self.later_rankings.pop(0)
+                if isinstance(later, Exception):
+                    raise later
+                return later
             return self.ranking if self.ranking is not None else fake_reply(prompt)
 
         return RunnableLambda(reply)
@@ -157,11 +178,56 @@ def test_planner_prompt_asks_for_broad_queries_with_synonyms() -> None:
     assert "EVERY word" in system
     assert "2 words each" in system
     assert "synonym" in system
-    assert "Every query keeps the problem's main subject" in system
+    assert "Every query contains the subject" in system
     assert "Never put a programming language in a query" in system
 
 
 # --- finding candidates
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("pdf table", "pdf table"),
+        ("PDF tabular", "PDF tabular"),
+        ("pdfs table", "pdfs table"),
+        ("table parser", "pdf table parser"),
+        ("table parser extra words", "pdf table parser"),
+    ],
+)
+def test_every_query_ends_up_with_the_subject(query: str, expected: str) -> None:
+    plan = _with_subject(SearchPlan(subject="pdf", queries=[query]))
+
+    assert plan.queries == [expected]
+
+
+def test_a_plural_or_capitalized_subject_is_still_recognized() -> None:
+    plan = _with_subject(SearchPlan(subject=" PDFs ", queries=["pdf table", "table parser"]))
+
+    assert plan.subject == "pdfs"
+    assert plan.queries == ["pdf table", "pdfs table parser"]
+
+
+def test_repeated_queries_are_removed_after_adding_the_subject() -> None:
+    plan = _with_subject(SearchPlan(subject="pdf", queries=["table", "pdf table"]))
+
+    assert plan.queries == ["pdf table"]
+
+
+def test_a_plan_without_a_subject_is_left_alone(caplog: pytest.LogCaptureFixture) -> None:
+    plan = SearchPlan(subject="  ", queries=["table parser"])
+
+    assert _with_subject(plan).queries == ["table parser"]
+    assert "gave no subject" in caplog.text
+
+
+def test_the_planned_queries_are_corrected_and_saved_that_way(github: FakeGitHub, llm: FakeLLM) -> None:
+    llm.plan = SearchPlan(subject="pdf", queries=["table extraction", "pdf tabular"], must_have=[])
+
+    body = search().json()
+
+    assert body["plan"]["queries"] == ["pdf table extraction", "pdf tabular"]
+    assert "pdf table extraction archived:false" in github.queries
 
 
 def test_merge_removes_duplicates_across_queries_and_ignores_case() -> None:
@@ -197,14 +263,14 @@ def test_find_repos_searches_every_query_and_reads_each_readme_once(github: Fake
     plan, candidates = asyncio.run(find_repos("Extract tables"))
 
     assert plan == llm.plan
-    assert sorted(github.queries) == ["pdf table archived:false", "tabular pdf archived:false"]
+    assert sorted(github.queries) == ["pdf archived:false", "pdf table archived:false", "tabular pdf archived:false"]
     assert sorted(item.repo.full_name for item in candidates) == ["acme/a", "acme/b", "acme/c"]
     assert sorted(github.readmes_read) == ["acme/a", "acme/b", "acme/c"]
     assert candidates[0].readme.startswith("README of")
 
 
 def test_the_planned_language_filters_every_query(github: FakeGitHub, llm: FakeLLM) -> None:
-    llm.plan = SearchPlan(queries=["whatsapp bot", "whatsapp api"], language="Python", must_have=[])
+    llm.plan = SearchPlan(subject="whatsapp", queries=["whatsapp bot", "whatsapp api"], language="Python", must_have=[])
 
     asyncio.run(find_repos("WhatsApp bot in Python"))
 
@@ -212,11 +278,77 @@ def test_the_planned_language_filters_every_query(github: FakeGitHub, llm: FakeL
 
 
 def test_only_three_queries_are_run_and_blank_ones_are_skipped(github: FakeGitHub, llm: FakeLLM) -> None:
-    llm.plan = SearchPlan(queries=["one", "  ", "two", "three", "four"], language=None, must_have=[])
+    llm.plan = SearchPlan(subject="x", queries=["x one", "  ", "x two", "x three", "x four"], must_have=[])
+    github.items_by_query["x one"] = [github_item(f"acme/{number}") for number in range(MIN_CANDIDATES)]
 
     asyncio.run(find_repos("Anything"))
 
-    assert sorted(github.queries) == ["one archived:false", "three archived:false", "two archived:false"]
+    assert sorted(github.queries) == ["x one archived:false", "x three archived:false", "x two archived:false"]
+
+
+# --- the broader retry
+
+
+def test_too_few_candidates_runs_one_search_for_the_subject_alone(github: FakeGitHub, llm: FakeLLM) -> None:
+    github.items_by_query["pdf table"] = [github_item("acme/a")]
+    github.items_by_query["pdf"] = [github_item("acme/a"), github_item("acme/broad")]
+
+    _, candidates = asyncio.run(find_repos("Anything"))
+
+    assert github.queries.count("pdf archived:false") == 1
+    assert len(github.queries) == 3
+    assert sorted(item.repo.full_name for item in candidates) == ["acme/a", "acme/broad"]
+
+
+def test_the_broader_search_keeps_the_language(github: FakeGitHub, llm: FakeLLM) -> None:
+    llm.plan = SearchPlan(subject="pdf", queries=["pdf table"], language="Python", must_have=[])
+
+    asyncio.run(find_repos("Anything"))
+
+    assert all("language:Python" in query for query in github.queries)
+    assert len(github.queries) == 2
+
+
+def test_enough_candidates_skips_the_broader_search(github: FakeGitHub, llm: FakeLLM) -> None:
+    github.items_by_query["pdf table"] = [github_item(f"acme/{number}") for number in range(MIN_CANDIDATES)]
+
+    asyncio.run(find_repos("Anything"))
+
+    assert "pdf archived:false" not in github.queries
+
+
+def test_stale_repos_do_not_count_towards_enough_candidates(github: FakeGitHub, llm: FakeLLM) -> None:
+    stale = datetime.now(timezone.utc) - timedelta(days=4 * 365)
+    github.items_by_query["pdf table"] = [github_item(f"acme/{n}", pushed_at=stale) for n in range(MIN_CANDIDATES)]
+
+    asyncio.run(find_repos("Anything"))
+
+    assert "pdf archived:false" in github.queries
+
+
+def test_a_failed_broader_search_keeps_what_was_found(
+    github: FakeGitHub, llm: FakeLLM, caplog: pytest.LogCaptureFixture
+) -> None:
+    github.items_by_query["pdf table"] = [github_item("acme/a")]
+    github.status_by_query["pdf"] = 429
+
+    _, candidates = asyncio.run(find_repos("Anything"))
+
+    assert [item.repo.full_name for item in candidates] == ["acme/a"]
+    assert "broader GitHub search failed" in caplog.text
+
+
+def test_the_broader_search_is_skipped_if_the_plan_already_searched_the_subject(
+    github: FakeGitHub, llm: FakeLLM
+) -> None:
+    llm.plan = SearchPlan(subject="pdf", queries=["pdf"], must_have=[])
+
+    asyncio.run(find_repos("Anything"))
+
+    assert github.queries == ["pdf archived:false"]
+
+
+# --- READMEs and failures
 
 
 def test_readmes_are_trimmed_for_the_reranker(
@@ -319,6 +451,80 @@ def test_clean_limits_the_start_steps() -> None:
     assert len(cleaned[0].how_to_start) == 4
 
 
+# --- no silent drops
+
+
+def test_left_out_candidates_get_a_second_smaller_call(llm: FakeLLM) -> None:
+    llm.ranking = Ranking(results=[assessment("acme/a", 90)])
+    llm.later_rankings = [Ranking(results=[assessment("acme/b", 95)])]
+    candidates = [candidate("acme/a"), candidate("acme/b", "r" * (MAX_README_CHARS_FOR_SECOND_RERANK + 100))]
+
+    results = asyncio.run(rank_candidates("Anything", llm.plan, candidates))
+
+    assert llm.ranking_calls == 2
+    assert [(item.full_name, item.score) for item in results] == [("acme/b", 95), ("acme/a", 90)]
+    second_prompt = llm.prompts[Ranking][0].content
+    assert "### acme/a" not in second_prompt
+    assert "There are 1 candidates" in second_prompt
+    assert "r" * MAX_README_CHARS_FOR_SECOND_RERANK in second_prompt
+    assert "r" * (MAX_README_CHARS_FOR_SECOND_RERANK + 1) not in second_prompt
+
+
+def test_a_complete_ranking_makes_one_call(llm: FakeLLM) -> None:
+    llm.ranking = Ranking(results=[assessment("acme/a")])
+
+    asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a")]))
+
+    assert llm.ranking_calls == 1
+
+
+def test_candidates_left_out_twice_are_marked_not_assessed(llm: FakeLLM) -> None:
+    llm.ranking = Ranking(results=[assessment("acme/a", 20)])
+    llm.later_rankings = [Ranking(results=[])]
+
+    results = asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
+
+    assert llm.ranking_calls == 2
+    assert [(item.full_name, item.score) for item in results] == [("acme/a", 20), ("acme/b", None)]
+    assert results[1].why_it_fits == NOT_ASSESSED_REASON
+    assert results[1].how_to_start == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ServerError(503, {"error": {"code": 503, "message": "test"}}),
+        OutputParserException("not JSON"),
+    ],
+)
+def test_a_failed_second_call_keeps_the_first_results(
+    llm: FakeLLM, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    llm.ranking = Ranking(results=[assessment("acme/a", 80)])
+    llm.later_rankings = [error]
+
+    results = asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
+
+    assert [(item.full_name, item.score) for item in results] == [("acme/a", 80), ("acme/b", None)]
+    assert "second reranker call failed" in caplog.text
+
+
+def test_not_assessed_results_are_saved_and_listed_after_the_low_scores(github: FakeGitHub, llm: FakeLLM) -> None:
+    github.items_by_query["pdf table"] = [github_item("acme/low"), github_item("acme/left-out")]
+    llm.ranking = Ranking(results=[assessment("acme/low", 5)])
+    llm.later_rankings = [Ranking(results=[])]
+
+    created = search()
+
+    assert created.status_code == 201
+    assert [(item["full_name"], item["score"]) for item in created.json()["results"]] == [
+        ("acme/low", 5),
+        ("acme/left-out", None),
+    ]
+    stored = client.get(f"/api/finder/searches/{created.json()['id']}").json()
+    assert [item["score"] for item in stored["results"]] == [5, None]
+
+
 def test_no_candidates_skips_the_reranker_call(llm: FakeLLM) -> None:
     assert asyncio.run(rank_candidates("Anything", llm.plan, [])) == []
     assert Ranking not in llm.prompts
@@ -334,6 +540,7 @@ def test_reranker_prompt_has_the_problem_requirements_and_rules(llm: FakeLLM) ->
     assert "never invent features" in system.content
     assert "untrusted" in system.content
     assert "low scores for everything is a correct answer" in system.content
+    assert "There are 1 candidates" in system.content
 
 
 def test_braces_in_a_readme_do_not_break_the_prompt(llm: FakeLLM) -> None:
@@ -370,7 +577,12 @@ def test_search_saves_and_returns_results_sorted_by_score(github: FakeGitHub, ll
     assert response.status_code == 201
     body = response.json()
     assert body["problem"] == "Extract tables from PDFs"
-    assert body["plan"] == {"queries": ["pdf table", "tabular pdf"], "language": None, "must_have": ["reads tables"]}
+    assert body["plan"] == {
+        "subject": "pdf",
+        "queries": ["pdf table", "tabular pdf"],
+        "language": None,
+        "must_have": ["reads tables"],
+    }
     assert [result["full_name"] for result in body["results"]] == ["acme/high", "acme/low"]
     first = body["results"][0]
     assert first["url"] == "https://github.com/acme/high"
@@ -419,7 +631,7 @@ def assert_nothing_saved(db_session: Session) -> None:
 
 
 def test_github_rate_limit_returns_429(github: FakeGitHub, llm: FakeLLM, db_session: Session) -> None:
-    github.status_by_query = {"pdf table": 429, "tabular pdf": 429}
+    github.status_by_query = {"pdf table": 429, "tabular pdf": 429}  # the broader search never starts
 
     response = search()
 
@@ -497,7 +709,7 @@ class StructuredFake(FakeListChatModel):
             self.calls.append(self.label)
             if self.label in self.failing:
                 raise self.failing[self.label]
-            return SearchPlan(queries=["from fallback"])
+            return SearchPlan(subject="fallback", queries=["from fallback"])
 
         return RunnableLambda(reply)
 
@@ -550,3 +762,214 @@ def test_a_past_search_returns_its_results_sorted_by_score(github: FakeGitHub, l
 
 def test_an_unknown_search_returns_404() -> None:
     assert client.get("/api/finder/searches/999").status_code == 404
+
+
+# --- indexing a result
+
+
+@pytest.fixture
+def result_id(github: FakeGitHub, llm: FakeLLM) -> int:
+    """Run a search that finds one repo, and return that result's id."""
+    github.items_by_query["pdf table"] = [github_item("acme/sample")]
+    return search("Extract tables from PDFs").json()["results"][0]["id"]
+
+
+def test_indexing_a_result_adds_the_repo_links_it_and_starts_indexing(
+    result_id: int, cloned_urls: list[str], db_session: Session
+) -> None:
+    response = client.post(f"/api/finder/results/{result_id}/index")
+
+    assert response.status_code == 202
+    assert response.json()["name"] == "acme/sample"
+    assert cloned_urls == ["https://github.com/acme/sample"]
+    assert db_session.get(Repo, response.json()["id"]).status == "ready"
+    assert db_session.get(SearchResult, result_id).repo_id == response.json()["id"]
+
+
+def test_indexing_a_result_reuses_a_repo_that_was_already_added(result_id: int, cloned_urls: list[str]) -> None:
+    existing = client.post("/api/repos", json={"url": "https://github.com/acme/sample"}).json()
+
+    response = client.post(f"/api/finder/results/{result_id}/index")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == existing["id"]
+    assert len(cloned_urls) == 1
+    assert client.get("/api/finder/searches/1").json()["results"][0]["repo_id"] == existing["id"]
+
+
+def test_indexing_the_same_result_twice_does_not_index_again(result_id: int, cloned_urls: list[str]) -> None:
+    first = client.post(f"/api/finder/results/{result_id}/index")
+    second = client.post(f"/api/finder/results/{result_id}/index")
+
+    assert (first.status_code, second.status_code) == (202, 200)
+    assert len(cloned_urls) == 1
+
+
+def test_indexing_an_unknown_result_returns_404() -> None:
+    assert client.post("/api/finder/results/999/index").status_code == 404
+
+
+# --- the problem guide
+
+
+def guide(result: int) -> httpx.Response:
+    return client.post(f"/api/finder/results/{result}/guide")
+
+
+def test_a_guide_needs_a_known_result() -> None:
+    assert guide(999).status_code == 404
+
+
+def test_a_guide_needs_an_indexed_result(result_id: int) -> None:
+    response = guide(result_id)
+
+    assert response.status_code == 409
+    assert "Index this result first" in response.json()["detail"]
+
+
+def test_a_guide_needs_a_ready_repo(result_id: int, cloned_urls: list[str], db_session: Session) -> None:
+    repo_id = client.post(f"/api/finder/results/{result_id}/index").json()["id"]
+    db_session.get(Repo, repo_id).status = "indexing"
+    db_session.commit()
+
+    assert guide(result_id).status_code == 409
+
+
+def test_a_guide_needs_the_embedding_model_in_use(result_id: int, cloned_urls: list[str], db_session: Session) -> None:
+    repo_id = client.post(f"/api/finder/results/{result_id}/index").json()["id"]
+    db_session.get(Repo, repo_id).embedding_model = "other"
+    db_session.commit()
+
+    assert guide(result_id).json()["detail"].startswith("Re-index needed")
+
+
+def test_the_guide_is_saved_and_returned_with_the_problem_and_repo(
+    result_id: int, cloned_urls: list[str], db_session: Session
+) -> None:
+    repo_id = client.post(f"/api/finder/results/{result_id}/index").json()["id"]
+
+    response = guide(result_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result_id"] == result_id
+    assert body["problem"] == "Extract tables from PDFs"
+    assert body["repo_id"] == repo_id
+    assert body["repo_name"] == "acme/sample"
+    assert body["guide"].endswith(FAKE_CHAT_RESPONSES[0])
+    assert db_session.get(SearchResult, result_id).problem_guide == body["guide"]
+    assert client.get("/api/finder/searches/1").json()["results"][0]["problem_guide"] == body["guide"]
+
+
+def test_the_guide_starts_with_the_problem_word_for_word(
+    github: FakeGitHub, llm: FakeLLM, cloned_urls: list[str]
+) -> None:
+    github.items_by_query["pdf table"] = [github_item("acme/sample")]
+    problem = "Extract tables from PDFs,\nthen {load} them into my   database!"
+    result = search(problem).json()["results"][0]["id"]
+    client.post(f"/api/finder/results/{result}/index")
+
+    text = guide(result).json()["guide"]
+
+    assert text.startswith(
+        "## Your problem\n\n> Extract tables from PDFs,\n> then {load} them into my   database!\n\n"
+    )
+
+
+def test_the_guide_prompt_has_every_section_and_the_material(
+    result_id: int, cloned_urls: list[str], recording_model: RecordingChatModel
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+
+    guide(result_id)
+
+    system, human = recording_model.prompts[0]
+    for section in [
+        "## Recommended repo",
+        "## Does it solve your problem?",
+        "## Setup",
+        "## Step-by-step: solving YOUR problem with this repo",
+        "## What you still need to build yourself",
+        "## Gotchas and next steps",
+    ]:
+        assert section in system.content
+    assert "**Fully**, **Partly** or **No**" in system.content
+    assert "https://github.com/acme/sample" in system.content
+    assert "Only cite a file if it appears" in system.content
+    assert "untrusted" in system.content
+    assert "src/\n  app.py" in system.content  # file tree
+    assert "A tiny project used by the RepoGuide tests." in system.content  # README
+    assert "def greet" in system.content  # excerpts
+    assert "About acme/sample" in system.content  # GitHub description
+    assert "Extract tables from PDFs" in human.content
+    assert "acme/sample" in human.content
+
+
+def test_the_guide_searches_for_the_problem_and_for_setup_topics(
+    result_id: int, cloned_urls: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+    searches: list[tuple[str, int]] = []
+
+    class StubStore:
+        def similarity_search(self, query: str, k: int) -> list[Document]:
+            searches.append((query, k))
+            return [Document("code", metadata={"path": "a.py", "start_line": 1, "end_line": 2})]
+
+    monkeypatch.setattr("app.rag.get_vectorstore", lambda repo: StubStore())
+
+    assert guide(result_id).status_code == 200
+    assert searches[0] == ("Extract tables from PDFs", PROBLEM_EXCERPT_K)
+    assert searches[1:] == [(probe, PROBLEM_GUIDE_PROBE_K) for probe in PROBLEM_GUIDE_PROBES]
+
+
+def test_a_new_guide_replaces_the_old_one(
+    result_id: int, cloned_urls: list[str], recording_model: RecordingChatModel
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+    guide(result_id)
+    recording_model.responses = ["A newer guide."]
+    recording_model.i = 0
+
+    assert guide(result_id).json()["guide"].endswith("A newer guide.")
+
+
+def test_a_failed_guide_returns_503_and_keeps_the_old_one(
+    result_id: int, cloned_urls: list[str], db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+    old = guide(result_id).json()["guide"]
+
+    def fail(*_: Any) -> str:
+        raise ServerError(503, {"error": {"code": 503, "message": "test"}})
+
+    monkeypatch.setattr("app.routers.finder.generate_problem_guide", fail)
+
+    response = guide(result_id)
+
+    assert response.status_code == 503
+    assert "busy" in response.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(SearchResult, result_id).problem_guide == old
+
+
+def test_a_missing_setting_returns_503_for_the_guide(
+    result_id: int, cloned_urls: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    monkeypatch.setenv("GUIDE_MODELS", "guide-model-name")
+    get_settings.cache_clear()
+
+    response = guide(result_id)
+
+    assert response.status_code == 503
+    assert "GOOGLE_API_KEY" in response.json()["detail"]
+
+
+def test_deleting_the_repo_means_indexing_again(result_id: int, cloned_urls: list[str]) -> None:
+    repo_id = client.post(f"/api/finder/results/{result_id}/index").json()["id"]
+    assert client.delete(f"/api/repos/{repo_id}").status_code == 204
+
+    assert guide(result_id).status_code == 409

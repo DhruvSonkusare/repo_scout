@@ -1,18 +1,28 @@
-"""Endpoints to find repos for a problem and read past searches."""
+"""Endpoints to find repos for a problem, read past searches and get a guide to using a result."""
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from langchain_core.exceptions import OutputParserException
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import Search, SearchResult, SessionLocal, get_db
-from app.finder.chains import Candidate, RepoAssessment, SearchPlan, find_repos, rank_candidates
+from app.db import Repo, Search, SearchResult, SessionLocal, get_db
+from app.finder.chains import (
+    Candidate,
+    RepoResult,
+    SearchPlan,
+    find_repos,
+    generate_problem_guide,
+    rank_candidates,
+)
 from app.finder.github import GitHubError, GitHubRateLimitError
+from app.ingest import index_repo
 from app.llm import GEMINI_ERRORS, ModelSetupError, describe_gemini_error
-from app.schemas import SearchOut, SearchRequest, SearchSummaryOut
+from app.routers.chat import require_searchable
+from app.routers.repos import add_or_get_repo
+from app.schemas import ProblemGuideOut, RepoOut, SearchOut, SearchRequest, SearchSummaryOut
 
 router = APIRouter(prefix="/api/finder", tags=["finder"])
 
@@ -20,7 +30,7 @@ UNREADABLE_REPLY_MESSAGE = "The model's reply couldn't be read. Try the search a
 
 
 def _save_search(
-    problem: str, plan: SearchPlan, candidates: list[Candidate], assessments: list[RepoAssessment]
+    problem: str, plan: SearchPlan, candidates: list[Candidate], assessments: list[RepoResult]
 ) -> SearchOut:
     """Save the search and its results, and return them as stored."""
     repos = {candidate.repo.full_name: candidate.repo for candidate in candidates}
@@ -78,3 +88,49 @@ def get_search(search_id: int, db: Session = Depends(get_db)) -> Search:
     if search is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Search not found.")
     return search
+
+
+def _get_result_or_404(db: Session, result_id: int) -> SearchResult:
+    """Return a search result, or raise a 404."""
+    result = db.get(SearchResult, result_id)
+    if result is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Search result not found.")
+    return result
+
+
+@router.post("/results/{result_id}/index", response_model=RepoOut, status_code=status.HTTP_202_ACCEPTED)
+def index_result(
+    result_id: int, background_tasks: BackgroundTasks, response: Response, db: Session = Depends(get_db)
+) -> Repo:
+    """Link a result to its repo and start indexing it. A repo that was already added is reused as it is."""
+    result = _get_result_or_404(db, result_id)
+    repo, created = add_or_get_repo(db, result.url)
+    result.repo_id = repo.id
+    db.commit()
+    if created:
+        background_tasks.add_task(index_repo, repo.id)
+    else:
+        response.status_code = status.HTTP_200_OK
+    return repo
+
+
+@router.post("/results/{result_id}/guide", response_model=ProblemGuideOut)
+def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> ProblemGuideOut:
+    """Generate the guide for this result and save it, replacing any earlier one. This can take a while."""
+    result = _get_result_or_404(db, result_id)
+    repo = result.repo
+    if repo is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Index this result first: POST to its /index URL.")
+    require_searchable(repo)
+    try:
+        guide = generate_problem_guide(result.search.problem, repo, result.description)
+    except GEMINI_ERRORS as error:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, describe_gemini_error(error)) from error
+    except ValueError as error:
+        # The model factory raises this when a setting is missing from .env.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+    result.problem_guide = guide
+    db.commit()
+    return ProblemGuideOut(
+        result_id=result.id, problem=result.search.problem, repo_id=repo.id, repo_name=repo.name, guide=guide
+    )

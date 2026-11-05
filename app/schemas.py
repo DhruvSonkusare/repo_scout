@@ -65,7 +65,7 @@ class SearchResultOut(BaseModel):
     stars: int
     language: str | None
     last_pushed: datetime | None
-    score: int
+    score: int | None  # None means the model never assessed this repo
     why_it_fits: str
     caveats: str
     how_to_start: list[str]
@@ -88,6 +88,16 @@ class SearchOut(SearchSummaryOut):
 
     plan: dict[str, Any]
     results: list[SearchResultOut]
+
+
+class ProblemGuideOut(BaseModel):
+    """A guide to solving the user's problem with one repo, in Markdown, with what it was written for."""
+
+    result_id: int
+    problem: str
+    repo_id: int
+    repo_name: str
+    guide: str
 
 
 class AskRequest(BaseModel):

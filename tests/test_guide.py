@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.db import Repo
 from app.llm import FAKE_CHAT_RESPONSES
 from app.main import app
-from app.rag import MAX_README_CHARS, ONBOARDING_PROBES, _probe_excerpts, _read_readme
+from app.rag import MAX_README_CHARS, ONBOARDING_PROBES, _probe_excerpts, read_readme
 from tests.conftest import FakeGemini, RecordingChatModel
 
 pytestmark = pytest.mark.usefixtures("fresh_settings", "cloned_urls")
@@ -137,14 +137,14 @@ def test_probes_cover_each_topic_and_duplicates_are_removed(monkeypatch: pytest.
 def test_readme_is_cut_to_the_limit(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("x" * (MAX_README_CHARS + 500), encoding="utf-8")
 
-    assert len(_read_readme(tmp_path)) == MAX_README_CHARS
+    assert len(read_readme(tmp_path)) == MAX_README_CHARS
 
 
 @pytest.mark.parametrize("name", ["README.md", "readme.rst", "Readme.txt", "README"])
 def test_readme_is_found_by_common_names(tmp_path: Path, name: str) -> None:
     (tmp_path / name).write_text("hello", encoding="utf-8")
 
-    assert _read_readme(tmp_path) == "hello"
+    assert read_readme(tmp_path) == "hello"
 
 
 def test_missing_readme_is_stated_in_the_prompt(repo_id: int, recording_model: RecordingChatModel) -> None:
@@ -160,13 +160,13 @@ def test_a_linked_readme_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyP
     (tmp_path / "README.md").write_text("secret from outside the clone", encoding="utf-8")
     monkeypatch.setattr(Path, "is_symlink", lambda path: path.name == "README.md")
 
-    assert _read_readme(tmp_path) == ""
+    assert read_readme(tmp_path) == ""
 
 
 def test_a_readme_that_is_not_utf8_does_not_fail(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_bytes(b"caf\xe9")
 
-    assert _read_readme(tmp_path).startswith("caf")
+    assert read_readme(tmp_path).startswith("caf")
 
 
 # --- errors

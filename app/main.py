@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import get_settings
 from app.db import engine
 from app.ingest import fail_interrupted_repos
-from app.llm import model_chain_problem, validate_model_chains
+from app.llm import close_models, model_chain_problem, validate_model_chains
 from app.routers import chat, finder, guide, repos
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Clean up after the previous run and check the model names when the server starts."""
+    """Clean up after the previous run and check the model names at startup, and close clients at shutdown."""
     try:
         fail_interrupted_repos()
     except SQLAlchemyError:
@@ -33,6 +33,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.warning("Could not check for interrupted repos: the database is unavailable.")
     await asyncio.to_thread(validate_model_chains)
     yield
+    await close_models()
 
 
 app = FastAPI(title="RepoGuide", lifespan=lifespan)

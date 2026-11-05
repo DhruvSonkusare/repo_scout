@@ -47,7 +47,7 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.ingest import remove_clone  # noqa: E402
-from app.llm import FAKE_CHAT_RESPONSES, _unknown_models, circuit_breaker  # noqa: E402
+from app.llm import FAKE_CHAT_RESPONSES, _gemini_models, _unknown_models, circuit_breaker  # noqa: E402
 
 SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
@@ -82,9 +82,10 @@ def clean_tables(migrated_database: None) -> None:
 
 @pytest.fixture(autouse=True)
 def every_model_usable() -> None:
-    """Start each test with no model being skipped or dropped."""
+    """Start each test with no model being skipped or dropped, and no client from another test's settings."""
     circuit_breaker.reset()
     _unknown_models.clear()
+    _gemini_models.clear()
 
 
 @pytest.fixture

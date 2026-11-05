@@ -10,7 +10,8 @@ tzdata
 httpx
 langchain-core
 langchain-text-splitters
-langchain-google-genai
+# 4.4 at least, for ChatGoogleGenerativeAI.aclose(), which server shutdown calls.
+langchain-google-genai>=4.4
 google-genai
 langchain-chroma
 chromadb

@@ -147,7 +147,7 @@ async def retrieve(repo_id: int, question: str) -> list[Document]:
     return await retriever.ainvoke(question)
 
 
-def _read_readme(root: Path) -> str:
+def read_readme(root: Path) -> str:
     """Return the start of a clone's README, or an empty string if it has none."""
     for path in sorted(root.iterdir()):
         # A link could point outside the clone, so only read real files.
@@ -156,14 +156,19 @@ def _read_readme(root: Path) -> str:
     return ""
 
 
-def _probe_excerpts(repo_id: int) -> list[Document]:
-    """Collect chunks for each onboarding topic, keeping one copy of chunks found more than once."""
+def collect_excerpts(repo_id: int, searches: list[tuple[str, int]]) -> list[Document]:
+    """Run several (query, k) searches, keeping one copy of chunks found more than once."""
     store = get_vectorstore(repo_id)
     unique: dict[tuple[str, int], Document] = {}
-    for probe in ONBOARDING_PROBES:
-        for document in store.similarity_search(probe, k=ONBOARDING_PROBE_K):
+    for query, k in searches:
+        for document in store.similarity_search(query, k=k):
             unique.setdefault((document.metadata["path"], document.metadata["start_line"]), document)
     return list(unique.values())
+
+
+def _probe_excerpts(repo_id: int) -> list[Document]:
+    """Collect chunks for each onboarding topic."""
+    return collect_excerpts(repo_id, [(probe, ONBOARDING_PROBE_K) for probe in ONBOARDING_PROBES])
 
 
 def generate_onboarding_guide(repo: Repo) -> str:
@@ -181,7 +186,7 @@ def generate_onboarding_guide(repo: Repo) -> str:
             "repo_name": repo.name,
             "languages": ", ".join(f"{language} ({count})" for language, count in languages),
             "file_tree": build_file_tree(root),
-            "readme": _read_readme(root) or "(this repo has no README)",
+            "readme": read_readme(root) or "(this repo has no README)",
             "excerpts": format_docs(_probe_excerpts(repo.id)),
         }
     )
