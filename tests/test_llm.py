@@ -6,6 +6,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
+from app.config import get_settings
 from app.llm import FAKE_CHAT_RESPONSES, FAKE_EMBEDDING_SIZE, get_chat_model, get_embeddings
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
@@ -55,6 +56,7 @@ def test_gemini_chat_model_uses_settings() -> None:
     assert model.model.endswith("chat-model-name")
     assert model.temperature == 0.2
     assert model.google_api_key.get_secret_value() == "placeholder-key"
+    assert model.max_retries == get_settings().max_retries + 1
 
 
 @pytest.mark.usefixtures("gemini_env")

@@ -1,5 +1,7 @@
 """The only place chat and embedding models are created (gemini or fake)."""
 
+from google.genai import Client
+from google.genai.types import HttpOptions, HttpRetryOptions
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 from langchain_core.language_models import BaseChatModel, FakeListChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -37,6 +39,9 @@ def get_chat_model() -> BaseChatModel:
         model=_require_gemini_setting(settings.chat_model, "CHAT_MODEL"),
         google_api_key=_gemini_api_key(settings),
         temperature=0.2,
+        # Despite its name, this counts every attempt including the first, and 0 means "use
+        # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
+        max_retries=settings.max_retries + 1,
     )
 
 
@@ -51,7 +56,15 @@ def get_embeddings() -> Embeddings:
     if settings.llm_provider == "fake":
         # The same text always gets the same vector, but the numbers don't capture meaning.
         return DeterministicFakeEmbedding(size=FAKE_EMBEDDING_SIZE)
-    return GoogleGenerativeAIEmbeddings(
+    api_key = _gemini_api_key(settings)
+    embeddings = GoogleGenerativeAIEmbeddings(
         model=_require_gemini_setting(settings.embedding_model, "EMBEDDING_MODEL"),
-        google_api_key=_gemini_api_key(settings),
+        google_api_key=api_key,
     )
+    # This class has no max_retries and silently ignores the argument, so it would never retry.
+    # Giving it a Google client configured with retries adds exponential backoff on 429 and 503.
+    embeddings.client = Client(
+        api_key=api_key,
+        http_options=HttpOptions(retry_options=HttpRetryOptions(attempts=settings.max_retries + 1)),
+    )
+    return embeddings

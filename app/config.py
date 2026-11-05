@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     google_api_key: SecretStr = SecretStr("")
     chat_model: str = ""
     embedding_model: str = ""
+    # Retries after the first attempt, for temporary errors such as 429 and 503.
+    max_retries: int = Field(default=3, ge=0)
 
     chunk_size: int = 1500
     chunk_overlap: int = 150

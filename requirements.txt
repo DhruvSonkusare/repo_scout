@@ -8,6 +8,7 @@ httpx
 langchain-core
 langchain-text-splitters
 langchain-google-genai
+google-genai
 langchain-chroma
 chromadb
 python-dotenv
