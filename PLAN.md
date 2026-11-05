@@ -19,7 +19,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 
 | Table | Columns |
 |---|---|
-| `repos` | id, url (unique), name (`owner/repo`), status (`pending/cloning/indexing/ready/failed`), error, file_count, chunk_count, languages (JSONB), onboarding_guide (text), created_at |
+| `repos` | id, url (unique), name (`owner/repo`), status (`pending/cloning/indexing/ready/failed`), error, file_count, chunk_count, chunks_embedded (progress), languages (JSONB), onboarding_guide (text), created_at |
 | `conversations` | id, repo_id → repos, title, created_at |
 | `messages` | id, conversation_id → conversations, role (`user/ai`), content, sources (JSONB list), created_at |
 | `searches` | id, problem (text), plan (JSONB: queries/language/keywords), created_at |
@@ -53,10 +53,10 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 > Read CLAUDE.md. Set up the project skeleton: create the folder layout from CLAUDE.md with
 > empty modules, `requirements.txt` (fastapi, uvicorn[standard], sqlalchemy>=2, psycopg[binary]>=3,
 > alembic, pydantic-settings, httpx, langchain-core, langchain-text-splitters,
-> langchain-google-genai, langchain-chroma, chromadb, python-dotenv, pytest, pytest-cov), `.env.example`
+> langchain-google-genai, langchain-chroma, langchain-community, fastembed, chromadb, python-dotenv, pytest, pytest-cov), `.env.example`
 > (DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide,
 > TEST_DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide_test,
-> GOOGLE_API_KEY, GITHUB_TOKEN, LLM_PROVIDER=gemini, CHAT_MODEL, EMBEDDING_MODEL, DATA_DIR=./data),
+> GOOGLE_API_KEY, GITHUB_TOKEN, LLM_PROVIDER=gemini, CHAT_MODEL, EMBEDDING_PROVIDER=local, EMBEDDING_MODEL, DATA_DIR=./data),
 > `.gitignore`, and a `docker-compose.yml` with a `db` service: image postgres:16, user/password/db
 > `repoguide`, port 5432, a named volume `pgdata`, a healthcheck using `pg_isready`, and an init
 > script `docker/init-test-db.sql` that also creates the `repoguide_test` database. Add a
@@ -75,7 +75,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 3. Create the venv, `pip install -r requirements.txt`, copy `.env.example` → `.env`,
    paste your Gemini key, `git init`.
 
-**Done when:** `uvicorn app.main:app --reload` runs and http://localhost:8000/api/health returns
+**Done when:** `uvicorn app.main:app --reload --reload-dir app` runs and http://localhost:8000/api/health returns
 `{"status": "ok", "db": "ok"}`; http://localhost:8000/docs opens.
 
 **If it fails:**
@@ -114,10 +114,13 @@ migration is and why production apps never use `create_all()`, and JSONB vs JSON
 ### Step 3: LLM factory
 **Prompt**
 > Implement `app/llm.py` with `get_chat_model()` and `get_embeddings()`. Provider "gemini" uses
-> `ChatGoogleGenerativeAI` (temperature 0.2) and `GoogleGenerativeAIEmbeddings`; provider
+> `ChatGoogleGenerativeAI` (temperature 0.2). `EMBEDDING_PROVIDER` chooses embeddings separately: "local"
+> (the default) uses `FastEmbedEmbeddings` with `jinaai/jina-embeddings-v2-base-code` unless `EMBEDDING_MODEL`
+> names another model, and "gemini" uses `GoogleGenerativeAIEmbeddings`. Provider
 > "fake" uses `FakeListChatModel` and `DeterministicFakeEmbedding(size=256)`. Add a tiny script
 > `scripts/smoke_llm.py` that sends "Say hello in 5 words" and embeds one sentence, printing the
-> vector length. Set `LLM_PROVIDER=fake` in `tests/conftest.py` so all tests from here on stay offline.
+> vector length. Set `LLM_PROVIDER=fake` and `EMBEDDING_PROVIDER=fake` in `tests/conftest.py` so all tests
+> from here on stay offline.
 
 **Done when:** `python scripts/smoke_llm.py` prints a reply from Gemini and a vector size.
 **Learn:** Why one factory for models: swapping providers only changes this one file.
@@ -151,7 +154,8 @@ and why we keep line numbers (citations).
 > Implement `app/vectorstore.py` (one `chromadb.PersistentClient`, `get_vectorstore(repo_id)`
 > returning a LangChain `Chroma` with collection `repo_<id>` and cosine space,
 > `delete_collection(repo_id)`). Then add `index_repo(repo_id)` in ingest.py: set status
-> cloning → indexing → ready/failed, embed in batches of 100, store file_count, chunk_count and
+> cloning → indexing → ready/failed, embed in batches, with pauses and 429 waits (using Gemini's retry
+> delay if it gives one) for Gemini embeddings only, save chunks_embedded after each batch, store file_count, chunk_count and
 > languages JSON, and save a readable error on failure. Then build `app/routers/repos.py` with
 > POST/GET/DELETE `/api/repos`, `/api/repos/{id}`, `/api/repos/{id}/reindex` and
 > `/api/repos/{id}/file` (resolve the full path, following symlinks, and return 404 unless it stays
@@ -160,6 +164,9 @@ and why we keep line numbers (citations).
 > that clears read-only flags (Git marks some `.git` files read-only, which makes a plain
 > `shutil.rmtree` fail on Windows). At startup, mark repos stuck in `pending`, `cloning` or `indexing`
 > as `failed` with a "server restarted" error, so they can be re-indexed.
+
+**Run the server with** `uvicorn app.main:app --reload --reload-dir app`. Plain `--reload` also watches
+`data/`, so cloning a repo restarts the server and kills the indexing job.
 
 **Done when:** in /docs, POST `https://github.com/pallets/click`, poll GET until status is `ready`,
 and see chunk_count > 0. `/file?path=../../../.env` (which points at the project's real `.env`)
@@ -324,7 +331,7 @@ original problem, gives numbered how-to steps for that exact problem and cites r
 
 ### Step 12: Tests
 **Prompt**
-> Finish `tests/conftest.py` (started in Steps 1–3) so it sets `LLM_PROVIDER=fake`, a tmp `DATA_DIR` and
+> Finish `tests/conftest.py` (started in Steps 1–3) so it sets `LLM_PROVIDER=fake`, `EMBEDDING_PROVIDER=fake`, a tmp `DATA_DIR` and
 > `DATABASE_URL=$TEST_DATABASE_URL` before importing the app; runs `alembic upgrade head` on the
 > test database once per session and truncates all tables between tests (so tests never touch
 > your real data). It also monkeypatches `clone_repo` to copy a small fixture repo from `tests/fixtures/`. Write
@@ -362,7 +369,7 @@ Pick 1–2:
 ## Resume bullets (fill in your real numbers at the end)
 - Built **RepoGuide**, an AI developer assistant that finds open-source repos for a problem
   described in plain English and answers questions about any GitHub codebase with
-  file- and line-level citations (FastAPI, LangChain, Gemini, PostgreSQL, SQLAlchemy, Alembic, Chroma, Docker).
+  file- and line-level citations (FastAPI, LangChain, Gemini, FastEmbed, PostgreSQL, SQLAlchemy, Alembic, Chroma, Docker).
 - Designed a RAG pipeline with language-aware code chunking, MMR retrieval and
   history-aware query rewriting, streaming answers over NDJSON.
 - Implemented an LLM query planner and reranker using structured outputs over the

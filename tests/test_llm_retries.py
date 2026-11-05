@@ -1,89 +1,35 @@
-"""Retry and error-message behaviour, against a local server that acts like the Gemini API."""
+"""Retry and error-message behaviour, against a local server that acts like the Gemini API.
 
-import json
-import threading
-from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+The fake_gemini fixture patches out sleeping, so backoff is checked without any real waiting.
+"""
 
 import pytest
 
-from app.llm import get_chat_model, get_embeddings
+from app.llm import gemini_retry_delay, get_chat_model, get_embeddings
 from scripts.smoke_llm import main as smoke_main
-
-pytestmark = pytest.mark.usefixtures("fresh_settings")
-
-SUCCESS_BODY = {
-    "candidates": [{"content": {"role": "model", "parts": [{"text": "hello"}]}, "finishReason": "STOP"}],
-    "embedding": {"values": [0.1, 0.2]},
-    "embeddings": [{"values": [0.1, 0.2]}],
-}
-
-
-class FakeGemini:
-    """Answers each request with the next status in `statuses`, repeating the last one."""
-
-    def __init__(self) -> None:
-        self.statuses = [200]
-        self.attempts = 0
-
-    def next_status(self) -> int:
-        """Count this attempt and return the status to answer it with."""
-        self.attempts += 1
-        return self.statuses[min(self.attempts, len(self.statuses)) - 1]
-
-
-@pytest.fixture
-def fake_gemini(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGemini]:
-    """Run the local server and point the Gemini provider at it, with one retry."""
-    gemini = FakeGemini()
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            self.rfile.read(int(self.headers.get("content-length", 0)))
-            status = gemini.next_status()
-            error = {"error": {"code": status, "message": "test error", "status": "TEST"}}
-            body = json.dumps(SUCCESS_BODY if status == 200 else error).encode()
-            self.send_response(status)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args: object) -> None:
-            """Keep test output quiet."""
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    # A short poll interval makes server.shutdown() return quickly after each test.
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
-    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "placeholder-key")
-    monkeypatch.setenv("CHAT_MODEL", "chat-model-name")
-    monkeypatch.setenv("EMBEDDING_MODEL", "embedding-model-name")
-    monkeypatch.setenv("MAX_RETRIES", "1")
-    yield gemini
-    server.shutdown()
-    server.server_close()
+from tests.conftest import FakeGemini
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_chat_retries_temporary_errors(fake_gemini: FakeGemini, status: int) -> None:
+def test_chat_retries_temporary_errors_with_a_backoff(fake_gemini: FakeGemini, status: int) -> None:
     fake_gemini.statuses = [status, 200]
 
     reply = get_chat_model().invoke("Hello?")
 
     assert reply.text == "hello"
     assert fake_gemini.attempts == 2
+    assert len(fake_gemini.sleeps) == 1 and fake_gemini.sleeps[0] > 0
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_embeddings_retry_temporary_errors(fake_gemini: FakeGemini, status: int) -> None:
+def test_embeddings_retry_temporary_errors_with_a_backoff(fake_gemini: FakeGemini, status: int) -> None:
     fake_gemini.statuses = [status, 200]
 
     vector = get_embeddings().embed_query("Hello?")
 
     assert vector == [0.1, 0.2]
     assert fake_gemini.attempts == 2
+    assert len(fake_gemini.sleeps) == 1 and fake_gemini.sleeps[0] > 0
 
 
 def test_embedding_batches_retry_temporary_errors(fake_gemini: FakeGemini) -> None:
@@ -106,6 +52,7 @@ def test_permanent_errors_are_not_retried(fake_gemini: FakeGemini) -> None:
     with pytest.raises(Exception):
         get_embeddings().embed_query("Hello?")
     assert fake_gemini.attempts == 1
+    assert fake_gemini.sleeps == []
 
 
 def test_zero_max_retries_means_a_single_attempt(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,6 +67,31 @@ def test_zero_max_retries_means_a_single_attempt(fake_gemini: FakeGemini, monkey
     with pytest.raises(Exception):
         get_embeddings().embed_query("Hello?")
     assert fake_gemini.attempts == 1
+    assert fake_gemini.sleeps == []
+
+
+def embedding_error(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, status: int) -> Exception:
+    """Return the real exception the embedding client raises for a status."""
+    monkeypatch.setenv("MAX_RETRIES", "0")
+    fake_gemini.statuses = [status]
+    with pytest.raises(Exception) as error:
+        get_embeddings().embed_query("Hello?")
+    return error.value
+
+
+def test_retry_delay_comes_from_gemini_when_it_gives_one(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_gemini.error_details = [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "37.5s"}]
+
+    assert gemini_retry_delay(embedding_error(fake_gemini, monkeypatch, 429), 60) == 37.5
+
+
+@pytest.mark.parametrize(("status", "expected"), [(429, 60), (503, 60), (400, None), (404, None)])
+def test_retry_delay_defaults_and_permanent_errors(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, status: int, expected: float | None
+) -> None:
+    assert gemini_retry_delay(embedding_error(fake_gemini, monkeypatch, status), 60) == expected
 
 
 def test_smoke_script_prints_results_on_success(fake_gemini: FakeGemini, capsys: pytest.CaptureFixture[str]) -> None:
@@ -153,6 +125,7 @@ def test_smoke_script_gives_a_short_message_on_api_errors(
     assert "\n" not in message
 
 
+@pytest.mark.usefixtures("fresh_settings")
 def test_smoke_script_reports_a_missing_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "")

@@ -1,18 +1,34 @@
 """Turn a GitHub repo into chunks ready for indexing: clone, filter files, split them."""
 
+import logging
 import os
 import re
+import shutil
+import stat
 import subprocess
+import time
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
+from sqlalchemy import update
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.db import IN_PROGRESS_STATUSES, Repo, SessionLocal
+from app.llm import GEMINI_ERRORS, describe_gemini_error, gemini_retry_delay, is_daily_quota_error
+from app.vectorstore import delete_collection, get_vectorstore
+
+logger = logging.getLogger(__name__)
 
 CLONE_TIMEOUT_SECONDS = 300
+# Chunks between progress updates for embeddings that run on this machine.
+LOCAL_EMBED_BATCH_SIZE = 32
 MAX_TREE_DEPTH = 3
 MAX_TREE_LINES = 300
 
@@ -99,6 +115,10 @@ class CloneError(RuntimeError):
     """A repo couldn't be cloned. The message is safe to show to users."""
 
 
+class IndexingError(RuntimeError):
+    """A repo couldn't be indexed. The message is safe to show to users."""
+
+
 @dataclass(frozen=True)
 class SourceFile:
     """A file in a cloned repo that should be indexed."""
@@ -110,15 +130,35 @@ class SourceFile:
 
 
 def parse_github_url(url: str) -> str:
-    """Return `owner/repo` for a https://github.com/owner/repo URL, or raise ValueError."""
+    """Return lowercase `owner/repo` for a https://github.com/owner/repo URL, or raise ValueError.
+
+    GitHub names aren't case-sensitive, so lowercasing stops one repo being added twice.
+    """
     match = GITHUB_URL_PATTERN.fullmatch(url)
     if match is None or match.group(2) in INVALID_REPO_NAMES:
         raise ValueError(f"Expected a URL like https://github.com/owner/repo, got: {url!r}")
-    return f"{match.group(1)}/{match.group(2)}"
+    return f"{match.group(1)}/{match.group(2)}".lower()
+
+
+def remove_clone(repo_id: int) -> None:
+    """Delete a repo's clone folder if it exists, including read-only files."""
+    clone = get_settings().repos_dir / str(repo_id)
+    if not clone.exists():
+        return
+    # Git marks some .git files read-only, and Windows refuses to delete read-only files.
+    # Links are skipped because chmod would change the file they point to, possibly outside the clone.
+    for directory, _, file_names in os.walk(clone):
+        os.chmod(directory, stat.S_IRWXU)
+        for file_name in file_names:
+            path = Path(directory) / file_name
+            if not path.is_symlink():
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    shutil.rmtree(clone)
 
 
 def clone_repo(url: str, repo_id: int) -> Path:
-    """Shallow-clone a repo into data/repos/<repo_id> and return that path."""
+    """Shallow-clone a repo into data/repos/<repo_id>, replacing any old clone, and return that path."""
+    remove_clone(repo_id)
     destination = get_settings().repos_dir / str(repo_id)
     # Cloning runs unattended, so a private or missing repo must fail, not wait for a login:
     # the env var stops terminal prompts, and the empty helper stops Windows login pop-ups.
@@ -254,3 +294,129 @@ def build_file_tree(root: Path) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def _add_batch_with_waits(store: Chroma, batch: list[Document], repo_name: str) -> None:
+    """Embed and store one batch, waiting out rate limits and temporary errors.
+
+    add_documents calls the embedding model first and only stores vectors if that succeeds,
+    so repeating a failed batch can't create duplicates.
+    """
+    settings = get_settings()
+    waited = 0.0
+    while True:
+        try:
+            store.add_documents(batch)
+            return
+        except GEMINI_ERRORS as error:
+            if is_daily_quota_error(error):
+                raise IndexingError(
+                    "Gemini's daily embedding quota is used up. Re-index after it resets, or use a paid key."
+                ) from error
+            delay = gemini_retry_delay(error, settings.embed_rate_limit_wait_seconds)
+            if delay is None:
+                raise
+            if waited + delay > settings.embed_max_wait_seconds:
+                raise IndexingError(
+                    f"Gemini kept refusing requests for {waited:.0f} seconds. {describe_gemini_error(error)}"
+                ) from error
+            logger.warning("%s: waiting %.0fs for Gemini. %s", repo_name, delay, describe_gemini_error(error))
+            time.sleep(delay)
+            waited += delay
+
+
+def _embed_chunks(db: Session, repo: Repo, chunks: list[Document]) -> None:
+    """Embed all chunks in batches, saving progress on the repo after each one.
+
+    Only Gemini has rate limits, so only Gemini batches get pauses and rate-limit waits.
+    """
+    settings = get_settings()
+    uses_gemini = settings.embedding_provider == "gemini"
+    batch_size = settings.embed_batch_size if uses_gemini else LOCAL_EMBED_BATCH_SIZE
+    store = get_vectorstore(repo.id)
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        if uses_gemini:
+            if start > 0:
+                time.sleep(settings.embed_delay_seconds)
+            _add_batch_with_waits(store, batch, repo.name)
+        else:
+            store.add_documents(batch)
+        repo.chunks_embedded = start + len(batch)
+        db.commit()
+
+
+def _run_indexing(db: Session, repo: Repo) -> None:
+    """Clone, split and embed a repo, moving its status through cloning, indexing and ready."""
+    repo.status = "cloning"
+    repo.error = None
+    repo.file_count = repo.chunk_count = repo.chunks_embedded = 0
+    repo.languages = {}
+    db.commit()
+
+    root = clone_repo(repo.url, repo.id)
+    repo.status = "indexing"
+    db.commit()
+
+    chunks: list[Document] = []
+    languages: Counter[str] = Counter()
+    for source in islice(iter_source_files(root), get_settings().max_files):
+        file_chunks = split_file(source)
+        if file_chunks:
+            chunks.extend(file_chunks)
+            languages[source.language] += 1
+    if not chunks:
+        raise IndexingError("This repo has no source files that can be indexed.")
+
+    repo.file_count = sum(languages.values())
+    repo.chunk_count = len(chunks)
+    repo.languages = dict(languages)
+    db.commit()
+
+    delete_collection(repo.id)
+    _embed_chunks(db, repo, chunks)
+    repo.status = "ready"
+    db.commit()
+
+
+def index_repo(repo_id: int) -> None:
+    """Background job: index a repo, and save a readable error if that fails.
+
+    It runs after the request has finished, so it opens its own database session.
+    """
+    with SessionLocal() as db:
+        repo = db.get(Repo, repo_id)
+        if repo is None:
+            return
+        try:
+            _run_indexing(db, repo)
+            return
+        except (CloneError, IndexingError) as error:
+            message = str(error)
+        except GEMINI_ERRORS as error:
+            message = describe_gemini_error(error)
+        except ValueError as error:
+            # The model factory raises this when a setting is missing from .env.
+            message = str(error)
+        except Exception:
+            logger.exception("Indexing repo %s failed", repo_id)
+            message = "Indexing failed because of a server error. See the server log for details."
+        db.rollback()
+        repo.status = "failed"
+        repo.error = message
+        db.commit()
+
+
+def fail_interrupted_repos() -> None:
+    """Mark jobs left over from the previous run as failed, so they can be re-indexed.
+
+    Background jobs live in the server process, so none survive a restart. This assumes
+    a single server process: with several workers, one could mark another's running job.
+    """
+    with SessionLocal() as db:
+        db.execute(
+            update(Repo)
+            .where(Repo.status.in_(IN_PROGRESS_STATUSES))
+            .values(status="failed", error="Indexing stopped because the server restarted. Re-index to try again.")
+        )
+        db.commit()

@@ -1,5 +1,6 @@
 """Tests for repo ingestion, using temporary directories and a local git repo."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from app.ingest import (
     clone_repo,
     iter_source_files,
     parse_github_url,
+    remove_clone,
     split_file,
 )
 
@@ -67,6 +69,7 @@ def body_of(page_content: str) -> str:
         ("https://github.com/pallets/click.git", "pallets/click"),
         ("https://github.com/some-org/repo_name.js", "some-org/repo_name.js"),
         ("https://github.com/acme/.github", "acme/.github"),
+        ("https://github.com/Pallets/Click.git", "pallets/click"),
     ],
 )
 def test_parse_github_url_accepts_repo_urls(url: str, expected: str) -> None:
@@ -119,6 +122,36 @@ def test_clone_repo_makes_a_shallow_clone(tmp_path: Path, monkeypatch: pytest.Mo
         ["git", "-C", str(clone), "rev-list", "--count", "HEAD"], check=True, capture_output=True, text=True
     )
     assert history.stdout.strip() == "1"
+
+
+def test_clone_repo_replaces_an_existing_clone_with_read_only_git_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    origin = tmp_path / "origin"
+    write_file(origin, "hello.py")
+    git = ["git", "-C", str(origin), "-c", "user.name=Test", "-c", "user.email=test@example.com"]
+    subprocess.run(["git", "init", "--quiet", str(origin)], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "--quiet", "-m", "first"], check=True)
+
+    first_clone = clone_repo(origin.as_uri(), repo_id=3)
+    # Git marks its object files read-only. Check that's really what this test is deleting.
+    git_objects = [path for path in (first_clone / ".git" / "objects").rglob("*") if path.is_file()]
+    assert any(not os.access(path, os.W_OK) for path in git_objects)
+    leftover = write_file(first_clone, "leftover.py")
+
+    second_clone = clone_repo(origin.as_uri(), repo_id=3)
+
+    assert second_clone == first_clone
+    assert not leftover.exists()
+    assert (second_clone / "hello.py").is_file()
+
+
+def test_remove_clone_ignores_a_missing_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+
+    remove_clone(repo_id=999)
 
 
 def test_clone_repo_explains_a_failed_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,8 +21,11 @@ tests and a good README matter as much as features.
   (`postgresql+psycopg://...`). JSON fields use `JSONB`, timestamps use `DateTime(timezone=True)`.
 - **Alembic** for schema migrations. Never use `create_all()` in the app; every model
   change gets a new migration (`alembic revision --autogenerate -m "..."`).
-- **LangChain** (`langchain-core`, `langchain-text-splitters`, `langchain-google-genai`,
-  `langchain-chroma`) with **Google Gemini** (chat + embeddings)
+- **LangChain** (`langchain-core`, `langchain-text-splitters`, `langchain-google-genai`, `langchain-community`,
+  `langchain-chroma`) with **Google Gemini** for chat and **FastEmbed** for embeddings, running locally by
+  default (`EMBEDDING_PROVIDER`: `local` | `gemini` | `fake`; `EMBEDDING_MODEL` picks the model). The default
+  model is `jinaai/jina-embeddings-v2-base-code`. Gemini embeddings stay available, but the free tier's
+  1,000 texts a day is too low to index most repos.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
@@ -39,7 +42,7 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
     config.py        # pydantic-settings Settings (reads .env)
     db.py            # engine, SessionLocal, Base, ORM models, get_db dependency
     schemas.py       # Pydantic request/response models
-    llm.py           # get_chat_model() / get_embeddings()  (gemini | fake)
+    llm.py           # get_chat_model() (gemini | fake) / get_embeddings() (local | gemini | fake)
     vectorstore.py   # Chroma helpers
     ingest.py        # clone + split + index a repo
     rag.py           # Q&A chain + onboarding guide chain
@@ -59,12 +62,17 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
 ```
 
 ## Conventions
-- All LLM/embedding objects come from `app/llm.py`. Never instantiate Gemini anywhere else.
-  `LLM_PROVIDER=fake` must make the whole app work offline (used by tests).
+- All LLM/embedding objects come from `app/llm.py`. Never instantiate Gemini or FastEmbed anywhere else.
+  `LLM_PROVIDER=fake` with `EMBEDDING_PROVIDER=fake` must make the whole app work offline (used by tests).
+- Pauses and rate-limit waits during indexing apply to Gemini embeddings only.
+- A collection only works with the embedding model that built it, so changing the provider or model
+  means re-indexing.
 - All prompts are `ChatPromptTemplate` constants at the top of the module.
 - Chains use LCEL (`prompt | model | parser`). Use `model.with_structured_output(PydanticModel)`
   whenever we need JSON from the LLM — never parse JSON by hand.
 - Long jobs (cloning/indexing) run in FastAPI `BackgroundTasks` and update a `status` column.
+- Dev server: `uvicorn app.main:app --reload --reload-dir app`. Plain `--reload` also watches
+  `data/`, so a clone restarts the server and kills the indexing job.
 - Secrets only in `.env` (never committed). Provide `.env.example`.
 - Type hints everywhere, short docstrings, no unused code.
 - After each step: run `pytest -q`, then summarise what changed.

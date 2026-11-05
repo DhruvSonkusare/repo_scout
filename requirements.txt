@@ -10,6 +10,8 @@ langchain-text-splitters
 langchain-google-genai
 google-genai
 langchain-chroma
+langchain-community
+fastembed
 chromadb
 python-dotenv
 pytest
