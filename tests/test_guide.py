@@ -204,21 +204,39 @@ def test_gemini_error_returns_503_and_keeps_the_old_guide(
     repo = db_session.get(Repo, repo_id)
     repo.onboarding_guide = "The earlier guide."
     db_session.commit()
-    fake_gemini.statuses = [503]
-    fake_gemini.attempts = 0
+    fake_gemini.statuses_by_model["guide-model-name"] = 503
 
     response = client.post(f"/api/repos/{repo_id}/guide")
 
+    assert fake_gemini.models_called()[-1] == "guide-model-name"
     assert response.status_code == 503
-    assert "Gemini is busy" in response.json()["detail"]
+    assert "Every configured model" in response.json()["detail"]
     db_session.expire_all()
     assert db_session.get(Repo, repo_id).onboarding_guide == "The earlier guide."
+
+
+def test_guides_are_written_by_the_guide_chain(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GUIDE_MODELS", "first-guide-model,second-guide-model")
+    repo_id = client.post("/api/repos", json={"url": "https://github.com/acme/sample"}).json()["id"]
+    fake_gemini.requests.clear()
+    fake_gemini.statuses_by_model["first-guide-model"] = 503
+
+    response = client.post(f"/api/repos/{repo_id}/guide")
+
+    assert response.status_code == 200
+    assert response.json()["guide"] == "hello"
+    assert [model for model in fake_gemini.models_called() if "embedding" not in model] == [
+        "first-guide-model",
+        "second-guide-model",
+    ]
 
 
 def test_missing_chat_setting_returns_503(repo_id: int, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "")
-    monkeypatch.setenv("CHAT_MODEL", "chat-model-name")
+    monkeypatch.setenv("GUIDE_MODELS", "guide-model-name")
     get_settings.cache_clear()
 
     response = client.post(f"/api/repos/{repo_id}/guide")

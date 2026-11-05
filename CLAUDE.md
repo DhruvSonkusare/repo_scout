@@ -30,8 +30,14 @@ tests and a good README matter as much as features.
   Docker and machines without a GPU. `requirements-gpu.txt` adds CUDA through `fastembed-gpu`. The two builds
   conflict, so a venv has one or the other. Install the GPU build with `scripts/install_gpu.ps1`, because
   `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU with a log line.
+- `CHAT_MODELS` and `GUIDE_MODELS` are comma-separated fallback chains, built with `.with_fallbacks()` in
+  `app/llm.py`. Only a 429 or 503 moves to the next model, and only before the first streamed token. An in-memory
+  circuit breaker skips a model until midnight Pacific after a daily-quota error, and for about 60 s after a rate
+  limit. `model_profile()` sets what each family accepts: thinking, system prompts (Gemma's are merged into the first
+  user message) and structured output. Answers record their model in `messages.model` and the `done` event.
 - `CHAT_THINKING_LEVEL` (`default` | `minimal` | `low` | `medium` | `high`, default `minimal`) sets how much
-  Gemini reasons before answering. `default` sends nothing, which older models need.
+  Gemini reasons before answering: a `thinking_level` for Gemini 3, a `thinking_budget` for 2.5, nothing for Gemma.
+  `default` sends nothing.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
@@ -49,7 +55,8 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
     config.py        # pydantic-settings Settings (reads .env)
     db.py            # engine, SessionLocal, Base, ORM models, get_db dependency
     schemas.py       # Pydantic request/response models
-    llm.py           # get_chat_model() (gemini | fake) / get_embeddings() (local | gemini | fake)
+    llm.py           # get_chat_model() / get_guide_model() / get_structured_model() (gemini | fake)
+                     # get_embeddings() (local | gemini | fake)
     vectorstore.py   # Chroma helpers
     ingest.py        # clone + split + index a repo
     rag.py           # Q&A chain + onboarding guide chain

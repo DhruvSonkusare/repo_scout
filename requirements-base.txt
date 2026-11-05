@@ -4,7 +4,9 @@ uvicorn[standard]
 sqlalchemy>=2
 psycopg[binary]>=3
 alembic
-pydantic-settings
+pydantic-settings>=2.7
+# Time zone data, which Windows and small Docker images lack. Daily quota resets use Pacific time.
+tzdata
 httpx
 langchain-core
 langchain-text-splitters

@@ -1,8 +1,13 @@
 """The only place chat and embedding models are created (gemini or fake)."""
 
 import logging
-from functools import lru_cache
-from typing import Any
+import time
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from datetime import datetime, time as clock_time, timedelta
+from functools import lru_cache, partial
+from typing import Any, Literal, NoReturn
+from zoneinfo import ZoneInfo
 
 import httpx
 import onnxruntime as ort
@@ -12,9 +17,12 @@ from google.genai.errors import APIError
 from google.genai.types import HttpOptions, HttpRetryOptions
 from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
-from langchain_core.language_models import BaseChatModel, FakeListChatModel
+from langchain_core.language_models import BaseChatModel, FakeListChatModel, LanguageModelInput
+from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, convert_to_messages
+from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_google_genai._common import GoogleGenerativeAIError
+from pydantic import BaseModel
 
 from app.config import Settings, get_settings
 
@@ -24,12 +32,26 @@ CUDA_PROVIDER = "CUDAExecutionProvider"
 CPU_PROVIDER = "CPUExecutionProvider"
 
 FAKE_CHAT_RESPONSES = ["This is a fake answer from the offline test model [1]."]
+FAKE_MODEL_NAME = "fake-model"
 FAKE_EMBEDDING_SIZE = 256
 # FastEmbed's one model trained specifically on source code.
 DEFAULT_LOCAL_EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-base-code"
 
-# Everything a Gemini call can raise. Chat errors are APIErrors; embedding errors wrap one in __cause__.
-GEMINI_ERRORS = (APIError, GoogleGenerativeAIError, httpx.HTTPError)
+# The only errors that move on to the next model: rate limits, quotas and overload.
+FALLBACK_STATUS_CODES = {429, 503}
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+# Google resets daily quotas at midnight Pacific time.
+QUOTA_RESET_ZONE = ZoneInfo("America/Los_Angeles")
+# Gemini 2.5 takes a token budget instead of a level. 0 turns thinking off.
+THINKING_BUDGETS = {"minimal": 0, "low": 1024, "medium": 8192, "high": 24576}
+
+
+class ModelUnavailableError(Exception):
+    """A model is rate limited, out of quota or overloaded, so the next one in the chain should answer."""
+
+
+# Everything a Gemini call can raise. Chat and embedding errors wrap an APIError in __cause__.
+GEMINI_ERRORS = (APIError, GoogleGenerativeAIError, httpx.HTTPError, ModelUnavailableError)
 GEMINI_ERROR_MESSAGES = {
     400: "Gemini rejected the request. Check GOOGLE_API_KEY and the model names in .env.",
     401: "Gemini rejected the API key. Check GOOGLE_API_KEY in .env.",
@@ -37,8 +59,12 @@ GEMINI_ERROR_MESSAGES = {
     404: "Gemini can't find that model. Run scripts/list_models.py and check the names in .env.",
     429: "Gemini's rate limit or quota was reached. Wait a minute and try again.",
 }
-GEMINI_BUSY_MESSAGE = "Gemini is busy right now. Try again shortly, or use a different CHAT_MODEL."
+GEMINI_BUSY_MESSAGE = "Gemini is busy right now. Try again shortly."
 GEMINI_DAILY_QUOTA_MESSAGE = "Gemini's daily quota for this model is used up. Use a different model, or try again tomorrow."
+ALL_MODELS_UNAVAILABLE_MESSAGE = (
+    "Every configured model is busy, rate limited or out of daily quota. Try again in a minute, or tomorrow if "
+    "the daily quotas are used up."
+)
 
 
 def _api_error(error: Exception) -> APIError | None:
@@ -94,6 +120,8 @@ def gemini_retry_delay(error: Exception, default_seconds: float) -> float | None
 
 def describe_gemini_error(error: Exception) -> str:
     """Turn a Gemini or network error into a short message."""
+    if isinstance(error, ModelUnavailableError):
+        return ALL_MODELS_UNAVAILABLE_MESSAGE
     api_error = _api_error(error)
     if is_daily_quota_error(error):
         return f"{GEMINI_DAILY_QUOTA_MESSAGE} (HTTP {api_error.code})"
@@ -119,30 +147,257 @@ def _gemini_api_key(settings: Settings) -> str:
     return _require_gemini_setting(settings.google_api_key.get_secret_value(), "GOOGLE_API_KEY")
 
 
-def get_chat_model() -> BaseChatModel:
-    """Return the configured chat model.
+@dataclass(frozen=True)
+class ModelProfile:
+    """What one model family accepts."""
 
-    Every LangChain chat model shares the BaseChatModel interface (invoke, stream, and use in
-    LCEL pipes like `prompt | model | parser`). So chains never need to know which provider they
-    got, and swapping Gemini for the fake only changes this function.
+    thinking: Literal["level", "budget"] | None = None
+    system_prompt: bool = True
+    structured_output: bool = True
+
+
+def model_profile(name: str) -> ModelProfile:
+    """Return what a model accepts, going by its name. A family we don't know gets only the basics."""
+    short_name = name.removeprefix("models/")
+    if short_name.startswith("gemini-3"):
+        return ModelProfile(thinking="level")
+    if short_name.startswith("gemini-2.5"):
+        return ModelProfile(thinking="budget")
+    if short_name.startswith("gemini-"):
+        return ModelProfile()
+    if short_name.startswith("gemma-"):
+        return ModelProfile(system_prompt=False, structured_output=False)
+    return ModelProfile(structured_output=False)
+
+
+def _thinking_settings(profile: ModelProfile, level: str) -> dict[str, Any]:
+    """Return the thinking option this model family understands, if it has one.
+
+    Gemini models "think" before writing, and the user sees nothing until that ends. Answers here
+    come from excerpts we supply, so they need little of it, and less means a faster first token.
     """
+    if level == "default" or profile.thinking is None:
+        return {}
+    if profile.thinking == "level":
+        return {"thinking_level": level}
+    return {"thinking_budget": THINKING_BUDGETS[level]}
+
+
+def _merge_system_prompt(model_input: LanguageModelInput) -> LanguageModelInput:
+    """Move system messages into the first user message, for models without system instructions."""
+    if isinstance(model_input, str):
+        return model_input
+    messages = convert_to_messages(model_input)
+    system_prompt = "\n\n".join(message.text for message in messages if isinstance(message, SystemMessage))
+    others: list[BaseMessage] = [message for message in messages if not isinstance(message, SystemMessage)]
+    if not system_prompt:
+        return others
+    for index, message in enumerate(others):
+        if isinstance(message, HumanMessage):
+            others[index] = HumanMessage(f"{system_prompt}\n\n{message.text}")
+            return others
+    return [HumanMessage(system_prompt), *others]
+
+
+class CircuitBreaker:
+    """Remembers, in memory, which models to skip until when, so we don't waste calls on them."""
+
+    def __init__(self) -> None:
+        self._open_until: dict[str, float] = {}
+
+    def is_open(self, name: str) -> bool:
+        """Return True while this model should be skipped."""
+        return _now() < self._open_until.get(name, 0.0)
+
+    def open_until(self, name: str, until: float) -> None:
+        """Skip this model until the given time."""
+        self._open_until[name] = until
+
+    def reset(self) -> None:
+        """Forget every model."""
+        self._open_until.clear()
+
+
+circuit_breaker = CircuitBreaker()  # shared, because chat and guide chains use the same quotas
+
+
+def _now() -> float:
+    """Return the current time. Wall-clock time, because a quota reset is a time of day."""
+    return time.time()
+
+
+def next_quota_reset(now: float) -> float:
+    """Return the next midnight Pacific time, when daily quotas reset."""
+    tomorrow = datetime.fromtimestamp(now, QUOTA_RESET_ZONE).date() + timedelta(days=1)
+    return datetime.combine(tomorrow, clock_time.min, tzinfo=QUOTA_RESET_ZONE).timestamp()
+
+
+def _is_answer_text(chunk: Any) -> bool:
+    """Return True for a chunk with text to show. Structured outputs aren't messages, and always count."""
+    return not isinstance(chunk, BaseMessage) or bool(chunk.text)
+
+
+class _ChainLink(Runnable[LanguageModelInput, Any]):
+    """One model in a fallback chain, which decides whether a failure should move on to the next model.
+
+    with_fallbacks can only filter by exception class, and a 429 and a 400 are the same class. So
+    this checks the status code, raising ModelUnavailableError only when falling back is right.
+    The model is built on its turn, because creating each Google client takes about half a second.
+    """
+
+    def __init__(self, name: str, build: Callable[[], Runnable], on_answer: Callable[[str], None] | None) -> None:
+        self.name = name
+        self.build = build
+        self.on_answer = on_answer
+
+    def _start(self, model_input: LanguageModelInput) -> tuple[Runnable, LanguageModelInput]:
+        """Return the model and its input, unless the circuit breaker says to skip this model."""
+        if circuit_breaker.is_open(self.name):
+            logger.info("Skipping model %s until its rate limit or quota resets.", self.name)
+            raise ModelUnavailableError(f"{self.name} is skipped by the circuit breaker")
+        accepts_system_prompt = model_profile(self.name).system_prompt
+        return self.build(), model_input if accepts_system_prompt else _merge_system_prompt(model_input)
+
+    def _answered(self) -> None:
+        """Report that this model is the one answering."""
+        logger.info("Model %s answered.", self.name)
+        if self.on_answer is not None:
+            self.on_answer(self.name)
+
+    def _handle_failure(self, error: Exception, answer_started: bool = False) -> NoReturn:
+        """Update the circuit breaker, then move on to the next model if that's allowed."""
+        api_error = _api_error(error)
+        code = api_error.code if api_error is not None else None
+        if is_daily_quota_error(error):
+            circuit_breaker.open_until(self.name, next_quota_reset(_now()))
+        elif code == 429:
+            circuit_breaker.open_until(self.name, _now() + gemini_retry_delay(error, RATE_LIMIT_COOLDOWN_SECONDS))
+        if code in FALLBACK_STATUS_CODES and not answer_started:
+            logger.warning("Model %s is unavailable (HTTP %s), so trying the next one.", self.name, code)
+            raise ModelUnavailableError(f"{self.name} returned HTTP {code}") from error
+        logger.warning("Model %s failed with no fallback (HTTP %s).", self.name, code)
+        raise error
+
+    def invoke(self, input: LanguageModelInput, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        """Return this model's whole reply."""
+        model, model_input = self._start(input)
+        try:
+            result = model.invoke(model_input, config, **kwargs)
+        except GEMINI_ERRORS as error:
+            self._handle_failure(error)
+        self._answered()
+        return result
+
+    async def ainvoke(self, input: LanguageModelInput, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        """Return this model's whole reply, without blocking the event loop."""
+        model, model_input = self._start(input)
+        try:
+            result = await model.ainvoke(model_input, config, **kwargs)
+        except GEMINI_ERRORS as error:
+            self._handle_failure(error)
+        self._answered()
+        return result
+
+    async def astream(
+        self, input: LanguageModelInput, config: RunnableConfig | None = None, **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        """Yield this model's reply piece by piece.
+
+        with_fallbacks falls back only until a link yields its first chunk. Empty chunks are held
+        back, so a model that fails after sending one can still fall back: the user has seen nothing.
+        """
+        model, model_input = self._start(input)
+        answer_started = False
+        try:
+            async for chunk in model.astream(model_input, config, **kwargs):
+                if not answer_started and _is_answer_text(chunk):
+                    answer_started = True
+                    self._answered()
+                if answer_started:
+                    yield chunk
+        except GEMINI_ERRORS as error:
+            self._handle_failure(error, answer_started)
+        if not answer_started:
+            self._answered()
+            yield AIMessageChunk(content="")
+
+
+def _fake_chat_model(name: str) -> BaseChatModel:
+    """Return the offline model. FakeListChatModel replies with these strings and never touches the network."""
+    return FakeListChatModel(responses=FAKE_CHAT_RESPONSES)
+
+
+def _build_chat_model(name: str, is_last: bool) -> BaseChatModel:
+    """Create one model of a chain, with the options its family accepts."""
     settings = get_settings()
     if settings.llm_provider == "fake":
-        # FakeListChatModel replies with these strings in turn and never touches the network.
-        return FakeListChatModel(responses=FAKE_CHAT_RESPONSES)
-    # Gemini 3 models "think" before writing, and the user sees nothing until that ends. Answers
-    # here come from excerpts we supply, so they need little of it, and less thinking means a
-    # faster first token. Older Gemini models reject this option: use CHAT_THINKING_LEVEL=default.
-    thinking = {} if settings.chat_thinking_level == "default" else {"thinking_level": settings.chat_thinking_level}
+        return _fake_chat_model(name)
+    # The next model is a faster retry than waiting out a backoff, so only the last one retries.
+    retries = settings.max_retries if is_last else 0
     return ChatGoogleGenerativeAI(
-        model=_require_gemini_setting(settings.chat_model, "CHAT_MODEL"),
+        model=name,
         google_api_key=_gemini_api_key(settings),
         temperature=0.2,
         # Despite its name, this counts every attempt including the first, and 0 means "use
         # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
-        max_retries=settings.max_retries + 1,
-        **thinking,
+        max_retries=retries + 1,
+        **_thinking_settings(model_profile(name), settings.chat_thinking_level),
     )
+
+
+def _chain_names(names: list[str], env_name: str) -> list[str]:
+    """Return a chain's model names, or explain which .env value is missing."""
+    settings = get_settings()
+    if settings.llm_provider == "fake":
+        return names or [FAKE_MODEL_NAME]
+    _gemini_api_key(settings)
+    _require_gemini_setting(",".join(names), env_name)
+    return names
+
+
+def _model_chain(
+    names: list[str],
+    build: Callable[[str, bool], Runnable],
+    on_answer: Callable[[str], None] | None = None,
+) -> Runnable:
+    """Join models into one runnable that tries each in order.
+
+    with_fallbacks returns a runnable that works like the first model, but on one of the listed
+    exceptions tries the next. When streaming, it can only switch before the first chunk, since
+    text already sent can't be taken back. Chains use it like any model: `prompt | model | parser`.
+    """
+    links = [
+        _ChainLink(name, partial(build, name, index == len(names) - 1), on_answer) for index, name in enumerate(names)
+    ]
+    return links[0].with_fallbacks(links[1:], exceptions_to_handle=(ModelUnavailableError,))
+
+
+def get_chat_model(on_answer: Callable[[str], None] | None = None) -> Runnable:
+    """Return the CHAT_MODELS chain, for answers. on_answer receives the name of the model that answers."""
+    return _model_chain(_chain_names(get_settings().chat_models, "CHAT_MODELS"), _build_chat_model, on_answer)
+
+
+def get_guide_model() -> Runnable:
+    """Return the GUIDE_MODELS chain, for long documents."""
+    return _model_chain(_chain_names(get_settings().guide_models, "GUIDE_MODELS"), _build_chat_model)
+
+
+def get_structured_model(schema: type[BaseModel]) -> Runnable:
+    """Return the CHAT_MODELS chain, replying with instances of a Pydantic class.
+
+    with_structured_output makes a model reply in the schema's shape and parses the reply into the
+    class. Each model needs its own schema request, so it's applied to each model and then those
+    are chained, leaving out models that can't do it.
+    """
+    names = _chain_names(get_settings().chat_models, "CHAT_MODELS")
+    capable = [name for name in names if model_profile(name).structured_output]
+    if not capable:
+        raise ValueError("No model in CHAT_MODELS supports structured output. Add a Gemini model to it.")
+
+    def build(name: str, is_last: bool) -> Runnable:
+        return _build_chat_model(name, is_last).with_structured_output(schema)
+
+    return _model_chain(capable, build)
 
 
 def embedding_identity() -> tuple[str, str]:

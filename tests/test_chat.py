@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from google.genai.errors import ClientError, ServerError
 from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 
@@ -14,8 +15,9 @@ from langchain_core.documents import Document
 from langchain_core.language_models import FakeListChatModel
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import Conversation, Message, Repo
-from app.llm import FAKE_CHAT_RESPONSES
+from app.llm import FAKE_CHAT_RESPONSES, FAKE_MODEL_NAME
 from app.main import app
 from app.rag import format_docs, retrieve
 from tests.conftest import FakeGemini, RecordingChatModel
@@ -85,13 +87,88 @@ def test_ask_saves_both_messages(repo_id: int, db_session: Session) -> None:
     assert messages[0]["sources"] == []
 
 
+def test_done_event_and_saved_message_name_the_model(repo_id: int) -> None:
+    events = ask(repo_id)
+
+    assert events[-1]["model"] == FAKE_MODEL_NAME
+    messages = client.get(f"/api/conversations/{events[0]['conversation_id']}/messages").json()
+    assert [message["model"] for message in messages] == [None, FAKE_MODEL_NAME]
+
+
+def fail_first_model(monkeypatch: pytest.MonkeyPatch, pieces: list[Any]) -> list[str]:
+    """Use a chain of first and second, where first streams these pieces and raises any exception among them."""
+    built: list[str] = []
+
+    class Scripted(FakeListChatModel):
+        script: list[Any]
+
+        async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+            for piece in self.script:
+                if isinstance(piece, Exception):
+                    raise piece
+                yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+
+    def build(name: str) -> Scripted:
+        built.append(name)
+        return Scripted(responses=["unused"], script=pieces if name == "first" else ["From second."])
+
+    monkeypatch.setattr("app.llm._fake_chat_model", build)
+    monkeypatch.setenv("CHAT_MODELS", "first,second")
+    return built
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_fallback_answers_and_records_the_model_that_answered(
+    repo_id: int, monkeypatch: pytest.MonkeyPatch, db_session: Session, status: int
+) -> None:
+    kind = ClientError if status == 429 else ServerError
+    built = fail_first_model(monkeypatch, [kind(status, {"error": {"code": status, "message": "test"}})])
+    get_settings.cache_clear()
+
+    events = ask(repo_id)
+
+    assert built == ["first", "second"]
+    assert answer_text(events) == "From second."
+    assert events[-1]["model"] == "second"
+    assert db_session.get(Message, events[-1]["message_id"]).model == "second"
+
+
+def test_a_400_becomes_an_error_event_without_falling_back(
+    repo_id: int, monkeypatch: pytest.MonkeyPatch, db_session: Session
+) -> None:
+    built = fail_first_model(monkeypatch, [ClientError(400, {"error": {"code": 400, "message": "test"}})])
+    get_settings.cache_clear()
+
+    events = ask(repo_id)
+
+    assert built == ["first"]
+    assert events[-1]["type"] == "error"
+    assert "rejected the request" in events[-1]["message"]
+    assert [message.role for message in db_session.query(Message).all()] == ["user"]
+
+
+def test_an_error_after_the_first_token_ends_the_stream_and_saves_no_answer(
+    repo_id: int, monkeypatch: pytest.MonkeyPatch, db_session: Session
+) -> None:
+    error = ServerError(503, {"error": {"code": 503, "message": "test"}})
+    built = fail_first_model(monkeypatch, ["Partly", error])
+    get_settings.cache_clear()
+
+    events = ask(repo_id)
+
+    assert built == ["first"]
+    assert answer_text(events) == "Partly"
+    assert events[-1]["type"] == "error"
+    assert [message.role for message in db_session.query(Message).all()] == ["user"]
+
+
 def test_empty_tokens_are_not_sent(repo_id: int, monkeypatch: pytest.MonkeyPatch) -> None:
     class ModelWithEmptyChunks(FakeListChatModel):
         async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
             for text in ["", "Hello", "", " world", ""]:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=text))
 
-    monkeypatch.setattr("app.rag.get_chat_model", lambda: ModelWithEmptyChunks(responses=["unused"]))
+    monkeypatch.setattr("app.llm._fake_chat_model", lambda name: ModelWithEmptyChunks(responses=["unused"]))
 
     events = ask(repo_id)
 
@@ -283,13 +360,13 @@ def test_gemini_error_becomes_an_error_event_and_saves_no_answer(
     monkeypatch.setenv("MAX_RETRIES", "0")
     repo = client.post("/api/repos", json={"url": "https://github.com/acme/sample"}).json()
     assert client.get(f"/api/repos/{repo['id']}").json()["status"] == "ready"
-    fake_gemini.statuses = [503]
-    fake_gemini.attempts = 0
+    fake_gemini.statuses_by_model["chat-model-name"] = 503
 
     events = ask(repo["id"])
 
+    assert fake_gemini.models_called()[-1] == "chat-model-name"
     assert events[-1]["type"] == "error"
-    assert "Gemini is busy" in events[-1]["message"]
+    assert "Every configured model" in events[-1]["message"]
     assert [message.role for message in db_session.query(Message).all()] == ["user"]
 
 

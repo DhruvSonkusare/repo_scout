@@ -13,5 +13,7 @@ This project is under construction. The full README comes in a later step.
   server and run `powershell -ExecutionPolicy Bypass -File scripts\install_gpu.ps1`. It needs a separate script
   because `chromadb` otherwise pulls in the CPU `onnxruntime` over the GPU build, and embeddings silently stay on the
   CPU. The server log says which device is in use.
-- **Gemini free tier:** daily limits are low and differ by model, and every question uses one or two requests. If
-  chat returns a daily quota error, set a different `CHAT_MODEL` or try again the next day.
+- **Gemini free tier:** daily limits are low and differ by model, and every question uses one or two requests. So
+  `CHAT_MODELS` and `GUIDE_MODELS` are ordered lists: on a 429 or 503 the next model answers. A model out of daily
+  quota is skipped until midnight Pacific time, and a rate-limited one for about a minute. The server log and each
+  answer's `model` field say which model answered.

@@ -20,10 +20,12 @@ from app.llm import (
     DEFAULT_LOCAL_EMBEDDING_MODEL,
     FAKE_CHAT_RESPONSES,
     FAKE_EMBEDDING_SIZE,
+    _build_chat_model,
     _local_embeddings,
     embedding_identity,
     get_chat_model,
     get_embeddings,
+    get_guide_model,
 )
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
@@ -78,13 +80,14 @@ def gemini_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "placeholder-key")
-    monkeypatch.setenv("CHAT_MODEL", "chat-model-name")
+    monkeypatch.setenv("CHAT_MODELS", "chat-model-name")
+    monkeypatch.setenv("GUIDE_MODELS", "guide-model-name")
     monkeypatch.setenv("EMBEDDING_MODEL", "embedding-model-name")
     return monkeypatch
 
 
 def test_tests_run_on_the_fake_provider() -> None:
-    assert isinstance(get_chat_model(), FakeListChatModel)
+    assert isinstance(_build_chat_model("any-name", is_last=True), FakeListChatModel)
 
 
 def test_fake_chat_model_works_in_an_lcel_chain() -> None:
@@ -279,7 +282,7 @@ def test_embedding_identity_ignores_the_device(local_env: pytest.MonkeyPatch) ->
 
 @pytest.mark.usefixtures("gemini_env")
 def test_gemini_chat_model_uses_settings() -> None:
-    model = get_chat_model()
+    model = _build_chat_model("chat-model-name", is_last=True)
 
     assert isinstance(model, ChatGoogleGenerativeAI)
     assert model.model.endswith("chat-model-name")
@@ -298,13 +301,13 @@ def test_minimal_is_the_default_thinking_level(monkeypatch: pytest.MonkeyPatch) 
 def test_thinking_level_setting_reaches_the_chat_model(gemini_env: pytest.MonkeyPatch, level: str) -> None:
     gemini_env.setenv("CHAT_THINKING_LEVEL", level)
 
-    assert get_chat_model().thinking_level == level
+    assert _build_chat_model("gemini-3-flash", is_last=True).thinking_level == level
 
 
 def test_default_thinking_level_sends_nothing(gemini_env: pytest.MonkeyPatch) -> None:
     gemini_env.setenv("CHAT_THINKING_LEVEL", "default")
 
-    assert get_chat_model().thinking_level is None
+    assert _build_chat_model("gemini-3-flash", is_last=True).thinking_level is None
 
 
 def test_thinking_level_rejects_unknown_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -327,7 +330,9 @@ def test_gemini_embeddings_use_settings() -> None:
     ("missing", "factory"),
     [
         ("GOOGLE_API_KEY", get_chat_model),
-        ("CHAT_MODEL", get_chat_model),
+        ("CHAT_MODELS", get_chat_model),
+        ("GOOGLE_API_KEY", get_guide_model),
+        ("GUIDE_MODELS", get_guide_model),
         ("GOOGLE_API_KEY", get_embeddings),
         ("EMBEDDING_MODEL", get_embeddings),
     ],

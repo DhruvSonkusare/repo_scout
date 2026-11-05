@@ -56,7 +56,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 > langchain-google-genai, langchain-chroma, langchain-community, fastembed, chromadb, python-dotenv, pytest, pytest-cov), `.env.example`
 > (DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide,
 > TEST_DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide_test,
-> GOOGLE_API_KEY, GITHUB_TOKEN, LLM_PROVIDER=gemini, CHAT_MODEL, EMBEDDING_PROVIDER=local, EMBEDDING_MODEL, DATA_DIR=./data),
+> GOOGLE_API_KEY, GITHUB_TOKEN, LLM_PROVIDER=gemini, CHAT_MODELS, GUIDE_MODELS, EMBEDDING_PROVIDER=local, EMBEDDING_MODEL, DATA_DIR=./data),
 > `.gitignore`, and a `docker-compose.yml` with a `db` service: image postgres:16, user/password/db
 > `repoguide`, port 5432, a named volume `pgdata`, a healthcheck using `pg_isready`, and an init
 > script `docker/init-test-db.sql` that also creates the `repoguide_test` database. Add a
@@ -113,8 +113,9 @@ migration is and why production apps never use `create_all()`, and JSONB vs JSON
 
 ### Step 3: LLM factory
 **Prompt**
-> Implement `app/llm.py` with `get_chat_model()` and `get_embeddings()`. Provider "gemini" uses
-> `ChatGoogleGenerativeAI` (temperature 0.2). `EMBEDDING_PROVIDER` chooses embeddings separately: "local"
+> Implement `app/llm.py` with `get_chat_model()`, `get_guide_model()`, `get_structured_model()` and
+> `get_embeddings()`. Provider "gemini" uses `ChatGoogleGenerativeAI` (temperature 0.2) in `.with_fallbacks()`
+> chains from `CHAT_MODELS` and `GUIDE_MODELS`. `EMBEDDING_PROVIDER` chooses embeddings separately: "local"
 > (the default) uses `FastEmbedEmbeddings` with `jinaai/jina-embeddings-v2-base-code` unless `EMBEDDING_MODEL`
 > names another model, on the device set by `EMBEDDING_DEVICE` (auto, cuda or cpu; `requirements-gpu.txt`
 > installs the CUDA build), and "gemini" uses `GoogleGenerativeAIEmbeddings`. Provider
@@ -254,7 +255,7 @@ and the 15–20 README fetches per search count against a limit of 60 API reques
 > Implement `app/finder/chains.py`:
 > - Pydantic `SearchPlan` (queries: list[str] 2–3 short GitHub-style keyword queries,
 >   language: str | None, must_have: list[str]) and a PLANNER_PROMPT that turns a plain-English
->   problem into it. Use `get_chat_model().with_structured_output(SearchPlan)`.
+>   problem into it. Use `get_structured_model(SearchPlan)`.
 > - `find_repos(problem)`: run the plan, call `search_repos` for each query concurrently
 >   (`asyncio.gather`), dedupe by full_name, drop repos not pushed in the last 3 years,
 >   take the top 15–20 deduplicated candidates, fetch their READMEs concurrently and trim each to

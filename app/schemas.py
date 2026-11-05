@@ -66,7 +66,7 @@ class ConversationOut(BaseModel):
 
 
 class MessageOut(BaseModel):
-    """One message in a conversation. AI messages list the sources they cite."""
+    """One message in a conversation. AI messages list the sources they cite and the model that wrote them."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,4 +75,5 @@ class MessageOut(BaseModel):
     role: str
     content: str
     sources: list[dict[str, Any]]
+    model: str | None
     created_at: datetime

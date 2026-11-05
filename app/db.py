@@ -93,6 +93,8 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(10))
     content: Mapped[str] = mapped_column(Text)
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    # The chat model that wrote an AI message. NULL for user messages and older answers.
+    model: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")

@@ -26,7 +26,7 @@ def main() -> None:
         # The model factory raises this when a setting is missing from .env.
         sys.exit(f"Setup problem: {error}")
     except GEMINI_ERRORS as error:
-        sys.exit(f"{describe_gemini_error(error)} Tried {settings.max_retries + 1} time(s).")
+        sys.exit(describe_gemini_error(error))
 
 
 if __name__ == "__main__":

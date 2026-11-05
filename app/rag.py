@@ -15,7 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from app.config import get_settings
 from app.db import Message, Repo, SessionLocal
 from app.ingest import build_file_tree
-from app.llm import GEMINI_ERRORS, describe_gemini_error, get_chat_model
+from app.llm import GEMINI_ERRORS, describe_gemini_error, get_chat_model, get_guide_model
 from app.vectorstore import get_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ def generate_onboarding_guide(repo: Repo) -> str:
     """
     root = get_settings().repos_dir / str(repo.id)
     languages = sorted(repo.languages.items(), key=lambda item: item[1], reverse=True)
-    chain = ONBOARDING_PROMPT | get_chat_model() | StrOutputParser()
+    chain = ONBOARDING_PROMPT | get_guide_model() | StrOutputParser()
     return chain.invoke(
         {
             "repo_name": repo.name,
@@ -187,10 +187,10 @@ def generate_onboarding_guide(repo: Repo) -> str:
     )
 
 
-def _save_ai_message(conversation_id: int, content: str, sources: list[dict[str, Any]]) -> int:
+def _save_ai_message(conversation_id: int, content: str, sources: list[dict[str, Any]], model: str) -> int:
     """Save the finished answer in a new session, because the request's session has already closed."""
     with SessionLocal() as db:
-        message = Message(conversation_id=conversation_id, role="ai", content=content, sources=sources)
+        message = Message(conversation_id=conversation_id, role="ai", content=content, sources=sources, model=model)
         db.add(message)
         db.commit()
         return message.id
@@ -204,7 +204,7 @@ def _event(**fields: Any) -> str:
 async def stream_answer(
     repo_id: int, conversation_id: int, question: str, history: list[BaseMessage]
 ) -> AsyncIterator[str]:
-    """Yield NDJSON events: meta (with sources), many tokens, then done or error.
+    """Yield NDJSON events: meta (with sources), many tokens, then done (with the model) or error.
 
     astream yields the answer piece by piece as the model writes it, so users see text at once. The
     answer is only saved once complete, so a failure can't leave half an answer in the conversation.
@@ -215,7 +215,8 @@ async def stream_answer(
         sources = build_sources(documents)
         yield _event(type="meta", conversation_id=conversation_id, sources=sources)
 
-        chain = ANSWER_PROMPT | get_chat_model() | StrOutputParser()
+        answered_by: list[str] = []
+        chain = ANSWER_PROMPT | get_chat_model(on_answer=answered_by.append) | StrOutputParser()
         tokens: list[str] = []
         inputs = {"excerpts": format_docs(documents), "history": history, "question": question}
         async for token in chain.astream(inputs):
@@ -224,8 +225,9 @@ async def stream_answer(
                 tokens.append(token)
                 yield _event(type="token", text=token)
 
-        message_id = await asyncio.to_thread(_save_ai_message, conversation_id, "".join(tokens), sources)
-        yield _event(type="done", message_id=message_id)
+        model = answered_by[-1]
+        message_id = await asyncio.to_thread(_save_ai_message, conversation_id, "".join(tokens), sources, model)
+        yield _event(type="done", message_id=message_id, model=model)
     except GEMINI_ERRORS as error:
         yield _event(type="error", message=describe_gemini_error(error))
     except Exception:

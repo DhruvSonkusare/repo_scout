@@ -37,6 +37,9 @@ os.environ["DATABASE_URL"] = test_database_url
 # Tests never call a real model, so they need no API key or quota.
 os.environ["LLM_PROVIDER"] = "fake"
 os.environ["EMBEDDING_PROVIDER"] = "fake"
+# Empty lists override a developer's .env, so answers come from the one fake model by default.
+os.environ["CHAT_MODELS"] = ""
+os.environ["GUIDE_MODELS"] = ""
 # Clones and vectors go in a temporary folder, so tests never touch real data.
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="repoguide-tests-"))
 os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
@@ -44,7 +47,7 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.ingest import remove_clone  # noqa: E402
-from app.llm import FAKE_CHAT_RESPONSES  # noqa: E402
+from app.llm import FAKE_CHAT_RESPONSES, circuit_breaker  # noqa: E402
 
 SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
@@ -75,6 +78,12 @@ def clean_tables(migrated_database: None) -> None:
     tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
     with engine.begin() as connection:
         connection.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def closed_circuit_breaker() -> None:
+    """Start each test with no model being skipped."""
+    circuit_breaker.reset()
 
 
 @pytest.fixture
@@ -136,9 +145,9 @@ class RecordingChatModel(FakeListChatModel):
 
 @pytest.fixture
 def recording_model(monkeypatch: pytest.MonkeyPatch) -> RecordingChatModel:
-    """Replace the chat model used for answers and guides."""
+    """Replace the fake model behind every chain, for answers and guides."""
     model = RecordingChatModel(responses=[FAKE_CHAT_RESPONSES[0]], prompts=[])
-    monkeypatch.setattr("app.rag.get_chat_model", lambda: model)
+    monkeypatch.setattr("app.llm._fake_chat_model", lambda name: model)
     return model
 
 
@@ -150,15 +159,23 @@ class FakeGemini:
 
     def __init__(self, sleeps: list[float]) -> None:
         self.statuses = [200]  # one per request; the last one repeats
+        self.statuses_by_model: dict[str, int] = {}  # overrides statuses for these models
         self.error_details: list[dict[str, Any]] = []
         self.attempts = 0
+        self.requests: list[tuple[str, dict[str, Any]]] = []  # (model name, request body)
         self.batch_sizes: list[int] = []  # texts per successful embedding request
         self.sleeps = sleeps
 
-    def next_status(self) -> int:
+    def next_status(self, model: str) -> int:
         """Count this attempt and return the status to answer it with."""
         self.attempts += 1
+        if model in self.statuses_by_model:
+            return self.statuses_by_model[model]
         return self.statuses[min(self.attempts, len(self.statuses)) - 1]
+
+    def models_called(self) -> list[str]:
+        """Return the model of each request, in order."""
+        return [model for model, _ in self.requests]
 
     def response_body(self, status: int, request: dict[str, Any]) -> dict[str, Any]:
         """Build a chat and embedding success response, or an error response."""
@@ -185,10 +202,15 @@ def fake_gemini(
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             request = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
-            status = gemini.next_status()
+            model = self.path.split("/models/")[-1].split(":")[0]
+            gemini.requests.append((model, request))
+            status = gemini.next_status(model)
             body = json.dumps(gemini.response_body(status, request)).encode()
+            is_stream = status == 200 and "streamGenerateContent" in self.path
+            if is_stream:
+                body = b"data: " + body + b"\n\n"
             self.send_response(status)
-            self.send_header("content-type", "application/json")
+            self.send_header("content-type", "text/event-stream" if is_stream else "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -203,7 +225,8 @@ def fake_gemini(
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "placeholder-key")
-    monkeypatch.setenv("CHAT_MODEL", "chat-model-name")
+    monkeypatch.setenv("CHAT_MODELS", "chat-model-name")
+    monkeypatch.setenv("GUIDE_MODELS", "guide-model-name")
     monkeypatch.setenv("EMBEDDING_MODEL", "embedding-model-name")
     monkeypatch.setenv("MAX_RETRIES", "1")
     yield gemini

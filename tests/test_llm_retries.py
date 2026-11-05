@@ -116,8 +116,8 @@ def test_smoke_script_prints_results_on_success(fake_gemini: FakeGemini, capsys:
 @pytest.mark.parametrize(
     ("statuses", "expected"),
     [
-        ([503], "Gemini is busy"),  # the chat call fails
-        ([429], "rate limit"),
+        ([503], "Every configured model"),  # the chat call fails
+        ([429], "Every configured model"),
         ([404], "can't find that model"),
         ([200, 503], "Gemini is busy"),  # chat works, then the embedding call fails
     ],
@@ -140,7 +140,7 @@ def test_smoke_script_gives_a_short_message_on_api_errors(
 def test_smoke_script_reports_a_missing_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "")
-    monkeypatch.setenv("CHAT_MODEL", "chat-model-name")
+    monkeypatch.setenv("CHAT_MODELS", "chat-model-name")
 
     with pytest.raises(SystemExit, match="GOOGLE_API_KEY"):
         smoke_main()
