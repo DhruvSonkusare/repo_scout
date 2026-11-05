@@ -47,7 +47,7 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.ingest import remove_clone  # noqa: E402
-from app.llm import FAKE_CHAT_RESPONSES, circuit_breaker  # noqa: E402
+from app.llm import FAKE_CHAT_RESPONSES, _unknown_models, circuit_breaker  # noqa: E402
 
 SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
@@ -81,9 +81,10 @@ def clean_tables(migrated_database: None) -> None:
 
 
 @pytest.fixture(autouse=True)
-def closed_circuit_breaker() -> None:
-    """Start each test with no model being skipped."""
+def every_model_usable() -> None:
+    """Start each test with no model being skipped or dropped."""
     circuit_breaker.reset()
+    _unknown_models.clear()
 
 
 @pytest.fixture
@@ -160,6 +161,8 @@ class FakeGemini:
     def __init__(self, sleeps: list[float]) -> None:
         self.statuses = [200]  # one per request; the last one repeats
         self.statuses_by_model: dict[str, int] = {}  # overrides statuses for these models
+        self.listed_models: dict[str, list[str]] = {}  # the model list: name -> supported actions
+        self.list_status = 200
         self.error_details: list[dict[str, Any]] = []
         self.attempts = 0
         self.requests: list[tuple[str, dict[str, Any]]] = []  # (model name, request body)
@@ -200,6 +203,20 @@ def fake_gemini(
     monkeypatch.setattr(ssl, "create_default_context", _cached_ssl_context)
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            """Answer the model list request."""
+            models = [
+                {"name": f"models/{name}", "supportedGenerationMethods": actions}
+                for name, actions in gemini.listed_models.items()
+            ]
+            status = gemini.list_status
+            body = json.dumps({"models": models} if status == 200 else gemini.response_body(status, {})).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self) -> None:
             request = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
             model = self.path.split("/models/")[-1].split(":")[0]

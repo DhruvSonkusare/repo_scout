@@ -14,6 +14,6 @@ This project is under construction. The full README comes in a later step.
   because `chromadb` otherwise pulls in the CPU `onnxruntime` over the GPU build, and embeddings silently stay on the
   CPU. The server log says which device is in use.
 - **Gemini free tier:** daily limits are low and differ by model, and every question uses one or two requests. So
-  `CHAT_MODELS` and `GUIDE_MODELS` are ordered lists: on a 429 or 503 the next model answers. A model out of daily
-  quota is skipped until midnight Pacific time, and a rate-limited one for about a minute. The server log and each
-  answer's `model` field say which model answered.
+  `CHAT_MODELS` and `GUIDE_MODELS` are ordered lists: on a 404, 429, 500, 503 or 504 the next model answers. A model
+  out of daily quota is skipped until midnight Pacific time, a rate-limited one for about a minute, and one that
+  returns a 404 until the server restarts. The server log and each answer's `model` field say which model answered.

@@ -118,7 +118,8 @@ def test_smoke_script_prints_results_on_success(fake_gemini: FakeGemini, capsys:
     [
         ([503], "Every configured model"),  # the chat call fails
         ([429], "Every configured model"),
-        ([404], "can't find that model"),
+        ([404], "Every configured model"),
+        ([400], "rejected the request"),
         ([200, 503], "Gemini is busy"),  # chat works, then the embedding call fails
     ],
 )

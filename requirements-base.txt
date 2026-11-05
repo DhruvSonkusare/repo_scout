@@ -13,7 +13,6 @@ langchain-text-splitters
 langchain-google-genai
 google-genai
 langchain-chroma
-langchain-community
 chromadb
 python-dotenv
 pytest

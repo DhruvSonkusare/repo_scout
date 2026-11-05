@@ -8,6 +8,9 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+ThinkingLevel = Literal["default", "minimal", "low", "medium", "high"]
+
+
 class Settings(BaseSettings):
     """Typed app configuration."""
 
@@ -19,11 +22,14 @@ class Settings(BaseSettings):
     llm_provider: Literal["gemini", "fake"] = "gemini"
     # SecretStr keeps the key out of logs and tracebacks.
     google_api_key: SecretStr = SecretStr("")
+    # Optional. Without it, GitHub allows far fewer requests.
+    github_token: SecretStr = SecretStr("")
     # Models to try in order, as comma-separated lists. NoDecode stops pydantic expecting JSON here.
     chat_models: Annotated[list[str], NoDecode] = []
     guide_models: Annotated[list[str], NoDecode] = []
-    # How much chat models reason before answering. default sends nothing, leaving it to the model.
-    chat_thinking_level: Literal["default", "minimal", "low", "medium", "high"] = "minimal"
+    # How much models reason before answering. default sends nothing, leaving it to the model.
+    chat_thinking_level: ThinkingLevel = "minimal"
+    guide_thinking_level: ThinkingLevel = "low"
     embedding_provider: Literal["gemini", "local", "fake"] = "local"
     # Empty means the default local model. Gemini requires a value.
     embedding_model: str = ""

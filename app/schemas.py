@@ -45,6 +45,51 @@ class GuideOut(BaseModel):
     guide: str
 
 
+class SearchRequest(BaseModel):
+    """A problem to find open-source repos for, in plain English."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    problem: str = Field(min_length=3, max_length=2000)
+
+
+class SearchResultOut(BaseModel):
+    """One repo found for a problem, and how well it fits."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    full_name: str
+    url: str
+    description: str | None
+    stars: int
+    language: str | None
+    last_pushed: datetime | None
+    score: int
+    why_it_fits: str
+    caveats: str
+    how_to_start: list[str]
+    repo_id: int | None
+    problem_guide: str | None
+
+
+class SearchSummaryOut(BaseModel):
+    """A past search, without its results."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    problem: str
+    created_at: datetime
+
+
+class SearchOut(SearchSummaryOut):
+    """A search with its plan and its results, best match first."""
+
+    plan: dict[str, Any]
+    results: list[SearchResultOut]
+
+
 class AskRequest(BaseModel):
     """A question about a repo. Leave out conversation_id to start a new conversation."""
 

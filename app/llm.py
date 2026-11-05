@@ -1,6 +1,7 @@
 """The only place chat and embedding models are created (gemini or fake)."""
 
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -15,16 +16,15 @@ from fastembed import TextEmbedding
 from google.genai import Client
 from google.genai.errors import APIError
 from google.genai.types import HttpOptions, HttpRetryOptions
-from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.embeddings import DeterministicFakeEmbedding, Embeddings
 from langchain_core.language_models import BaseChatModel, FakeListChatModel, LanguageModelInput
 from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, convert_to_messages
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_google_genai._common import GoogleGenerativeAIError
 from pydantic import BaseModel
 
-from app.config import Settings, get_settings
+from app.config import Settings, ThinkingLevel, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +36,26 @@ FAKE_MODEL_NAME = "fake-model"
 FAKE_EMBEDDING_SIZE = 256
 # FastEmbed's one model trained specifically on source code.
 DEFAULT_LOCAL_EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-base-code"
+LOCAL_EMBED_BATCH_SIZE = 256
 
-# The only errors that move on to the next model: rate limits, quotas and overload.
-FALLBACK_STATUS_CODES = {429, 503}
+# The only errors that move on to the next model: a model that's gone, rate limits, quotas, overload
+# and server errors. A 400 means our request is wrong, which the next model can't fix.
+MODEL_NOT_FOUND_CODE = 404
+FALLBACK_STATUS_CODES = {MODEL_NOT_FOUND_CODE, 429, 500, 503, 504}
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 # Google resets daily quotas at midnight Pacific time.
 QUOTA_RESET_ZONE = ZoneInfo("America/Los_Angeles")
 # Gemini 2.5 takes a token budget instead of a level. 0 turns thinking off.
 THINKING_BUDGETS = {"minimal": 0, "low": 1024, "medium": 8192, "high": 24576}
+MODEL_LIST_TIMEOUT_MS = 10_000
 
 
 class ModelUnavailableError(Exception):
     """A model is rate limited, out of quota or overloaded, so the next one in the chain should answer."""
+
+
+class ModelSetupError(ValueError):
+    """The .env settings can't produce a working model. The message says what to change."""
 
 
 # Everything a Gemini call can raise. Chat and embedding errors wrap an APIError in __cause__.
@@ -62,8 +70,8 @@ GEMINI_ERROR_MESSAGES = {
 GEMINI_BUSY_MESSAGE = "Gemini is busy right now. Try again shortly."
 GEMINI_DAILY_QUOTA_MESSAGE = "Gemini's daily quota for this model is used up. Use a different model, or try again tomorrow."
 ALL_MODELS_UNAVAILABLE_MESSAGE = (
-    "Every configured model is busy, rate limited or out of daily quota. Try again in a minute, or tomorrow if "
-    "the daily quotas are used up."
+    "Every configured model is unavailable: busy, rate limited or out of daily quota. Try again in a minute, or "
+    "tomorrow if the daily quotas are used up. The server log has the details for each model."
 )
 
 
@@ -138,7 +146,7 @@ def describe_gemini_error(error: Exception) -> str:
 def _require_gemini_setting(value: str, env_name: str) -> str:
     """Return a Gemini setting, or explain which .env value is missing."""
     if not value:
-        raise ValueError(f"{env_name} is not set. Add it to .env, or set LLM_PROVIDER=fake to run offline.")
+        raise ModelSetupError(f"{env_name} is not set. Add it to .env, or set LLM_PROVIDER=fake to run offline.")
     return value
 
 
@@ -163,14 +171,14 @@ def model_profile(name: str) -> ModelProfile:
         return ModelProfile(thinking="level")
     if short_name.startswith("gemini-2.5"):
         return ModelProfile(thinking="budget")
-    if short_name.startswith("gemini-"):
+    if short_name.startswith("gemini-") or short_name == FAKE_MODEL_NAME:
         return ModelProfile()
     if short_name.startswith("gemma-"):
         return ModelProfile(system_prompt=False, structured_output=False)
     return ModelProfile(structured_output=False)
 
 
-def _thinking_settings(profile: ModelProfile, level: str) -> dict[str, Any]:
+def _thinking_settings(profile: ModelProfile, level: ThinkingLevel) -> dict[str, Any]:
     """Return the thinking option this model family understands, if it has one.
 
     Gemini models "think" before writing, and the user sees nothing until that ends. Answers here
@@ -212,6 +220,14 @@ class CircuitBreaker:
     def open_until(self, name: str, until: float) -> None:
         """Skip this model until the given time."""
         self._open_until[name] = until
+
+    def disable(self, name: str) -> None:
+        """Skip this model until the server restarts."""
+        self._open_until[name] = math.inf
+
+    def is_disabled(self, name: str) -> bool:
+        """Return True if this model is skipped until the server restarts."""
+        return self._open_until.get(name) == math.inf
 
     def reset(self) -> None:
         """Forget every model."""
@@ -268,7 +284,10 @@ class _ChainLink(Runnable[LanguageModelInput, Any]):
         """Update the circuit breaker, then move on to the next model if that's allowed."""
         api_error = _api_error(error)
         code = api_error.code if api_error is not None else None
-        if is_daily_quota_error(error):
+        if code == MODEL_NOT_FOUND_CODE:
+            circuit_breaker.disable(self.name)
+            logger.error("Model %s was not found or is unavailable (HTTP 404). Disabled until restart.", self.name)
+        elif is_daily_quota_error(error):
             circuit_breaker.open_until(self.name, next_quota_reset(_now()))
         elif code == 429:
             circuit_breaker.open_until(self.name, _now() + gemini_retry_delay(error, RATE_LIMIT_COOLDOWN_SECONDS))
@@ -327,7 +346,7 @@ def _fake_chat_model(name: str) -> BaseChatModel:
     return FakeListChatModel(responses=FAKE_CHAT_RESPONSES)
 
 
-def _build_chat_model(name: str, is_last: bool) -> BaseChatModel:
+def _build_chat_model(name: str, is_last: bool, thinking_level: ThinkingLevel) -> BaseChatModel:
     """Create one model of a chain, with the options its family accepts."""
     settings = get_settings()
     if settings.llm_provider == "fake":
@@ -341,18 +360,89 @@ def _build_chat_model(name: str, is_last: bool) -> BaseChatModel:
         # Despite its name, this counts every attempt including the first, and 0 means "use
         # Google's default", so add 1 to make MAX_RETRIES=0 really mean no retries.
         max_retries=retries + 1,
-        **_thinking_settings(model_profile(name), settings.chat_thinking_level),
+        **_thinking_settings(model_profile(name), thinking_level),
     )
 
 
+# Names that startup didn't find in Gemini's model list, which are left out of every chain.
+_unknown_models: set[str] = set()
+
+
+def _configured_chains(settings: Settings) -> dict[str, list[str]]:
+    """Return each chain's model names as written in .env, by setting name."""
+    return {"CHAT_MODELS": settings.chat_models, "GUIDE_MODELS": settings.guide_models}
+
+
+def _list_generation_models(api_key: str) -> set[str]:
+    """Return the names of the models this API key can generate with. Listing uses no generation quota."""
+    client = Client(
+        api_key=api_key,
+        http_options=HttpOptions(timeout=MODEL_LIST_TIMEOUT_MS, retry_options=HttpRetryOptions(attempts=1)),
+    )
+    return {
+        (model.name or "").removeprefix("models/")
+        for model in client.models.list(config={"page_size": 1000})
+        if "generateContent" in (model.supported_actions or [])
+    }
+
+
+def validate_model_chains() -> None:
+    """Check CHAT_MODELS and GUIDE_MODELS against Gemini's model list, and drop names it doesn't have.
+
+    A wrong name returns a 404, which never falls back, so it would stop every request that
+    reaches it. If the list can't be fetched, every model stays: a network blip at startup
+    shouldn't empty a working chain.
+    """
+    settings = get_settings()
+    _unknown_models.clear()
+    api_key = settings.google_api_key.get_secret_value()
+    if settings.llm_provider == "fake" or not api_key:
+        return
+    try:
+        available = _list_generation_models(api_key)
+    except GEMINI_ERRORS as error:
+        logger.warning("Couldn't check the model names, so keeping them all: %s", describe_gemini_error(error))
+        return
+    for env_name, names in _configured_chains(settings).items():
+        for name in names:
+            if name.removeprefix("models/") not in available:
+                _unknown_models.add(name)
+                logger.warning(
+                    "%s: dropping %r, because Gemini's model list has no such model for generating text. "
+                    "Run scripts/list_models.py to see the names.",
+                    env_name,
+                    name,
+                )
+        if names and set(names) <= _unknown_models:
+            logger.error("%s has no usable models left. /api/health will report this.", env_name)
+
+
 def _chain_names(names: list[str], env_name: str) -> list[str]:
-    """Return a chain's model names, or explain which .env value is missing."""
+    """Return a chain's usable model names, or explain what to fix in .env."""
     settings = get_settings()
     if settings.llm_provider == "fake":
         return names or [FAKE_MODEL_NAME]
     _gemini_api_key(settings)
     _require_gemini_setting(",".join(names), env_name)
-    return names
+    usable = [name for name in names if name not in _unknown_models and not circuit_breaker.is_disabled(name)]
+    if not usable:
+        raise ModelSetupError(
+            f"{env_name} has no usable models: Gemini doesn't offer any of {', '.join(names)}. "
+            "Run scripts/list_models.py, fix the names in .env and restart the server."
+        )
+    return usable
+
+
+def model_chain_problem() -> str | None:
+    """Explain why a chain can't run, for the health check, or return None if they all can."""
+    settings = get_settings()
+    problems: list[str] = []
+    for env_name, names in _configured_chains(settings).items():
+        try:
+            _chain_names(names, env_name)
+        except ModelSetupError as error:
+            problems.append(str(error))
+    return " ".join(dict.fromkeys(problems)) or None
 
 
 def _model_chain(
@@ -374,28 +464,35 @@ def _model_chain(
 
 def get_chat_model(on_answer: Callable[[str], None] | None = None) -> Runnable:
     """Return the CHAT_MODELS chain, for answers. on_answer receives the name of the model that answers."""
-    return _model_chain(_chain_names(get_settings().chat_models, "CHAT_MODELS"), _build_chat_model, on_answer)
+    settings = get_settings()
+    build = partial(_build_chat_model, thinking_level=settings.chat_thinking_level)
+    return _model_chain(_chain_names(settings.chat_models, "CHAT_MODELS"), build, on_answer)
 
 
 def get_guide_model() -> Runnable:
-    """Return the GUIDE_MODELS chain, for long documents."""
-    return _model_chain(_chain_names(get_settings().guide_models, "GUIDE_MODELS"), _build_chat_model)
+    """Return the GUIDE_MODELS chain, for long documents, which get their own thinking level."""
+    settings = get_settings()
+    build = partial(_build_chat_model, thinking_level=settings.guide_thinking_level)
+    return _model_chain(_chain_names(settings.guide_models, "GUIDE_MODELS"), build)
 
 
-def get_structured_model(schema: type[BaseModel]) -> Runnable:
+def get_structured_model(schema: type[BaseModel], fake_reply: Callable[[Any], BaseModel] | None = None) -> Runnable:
     """Return the CHAT_MODELS chain, replying with instances of a Pydantic class.
 
     with_structured_output makes a model reply in the schema's shape and parses the reply into the
     class. Each model needs its own schema request, so it's applied to each model and then those
-    are chained, leaving out models that can't do it.
+    are chained, leaving out models that can't do it. The fake provider replies with fake_reply.
     """
-    names = _chain_names(get_settings().chat_models, "CHAT_MODELS")
+    settings = get_settings()
+    names = _chain_names(settings.chat_models, "CHAT_MODELS")
     capable = [name for name in names if model_profile(name).structured_output]
     if not capable:
-        raise ValueError("No model in CHAT_MODELS supports structured output. Add a Gemini model to it.")
+        raise ModelSetupError("No model in CHAT_MODELS supports structured output. Add a Gemini model to it.")
 
     def build(name: str, is_last: bool) -> Runnable:
-        return _build_chat_model(name, is_last).with_structured_output(schema)
+        if settings.llm_provider == "fake" and fake_reply is not None:
+            return RunnableLambda(fake_reply)
+        return _build_chat_model(name, is_last, settings.chat_thinking_level).with_structured_output(schema)
 
     return _model_chain(capable, build)
 
@@ -450,8 +547,29 @@ def _load_text_embedding(model_name: str, cache_dir: str, device: str) -> TextEm
     return text_embedding
 
 
+class LocalEmbeddings(Embeddings):
+    """A FastEmbed model behind LangChain's Embeddings interface, so vector stores can use it.
+
+    The interface has two methods because many retrieval models treat the two sides differently:
+    embed_documents is for the text being stored, and embed_query is for the search that finds it.
+    Always using the right one means a model that does treat them differently still works here.
+    """
+
+    def __init__(self, model_name: str, model: TextEmbedding) -> None:
+        self.model_name = model_name
+        self.model = model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Return one vector per chunk of text being indexed."""
+        return [vector.tolist() for vector in self.model.embed(texts, batch_size=LOCAL_EMBED_BATCH_SIZE)]
+
+    def embed_query(self, text: str) -> list[float]:
+        """Return the vector for a search."""
+        return next(iter(self.model.query_embed(text))).tolist()
+
+
 @lru_cache
-def _local_embeddings(model_name: str, cache_dir: str, device: str) -> FastEmbedEmbeddings:
+def _local_embeddings(model_name: str, cache_dir: str, device: str) -> LocalEmbeddings:
     """Load a FastEmbed model once. Loading takes seconds, so every search can't repeat it.
 
     FastEmbed runs the model on this machine with ONNX Runtime, so there's no API key, quota or
@@ -463,13 +581,7 @@ def _local_embeddings(model_name: str, cache_dir: str, device: str) -> FastEmbed
             f"EMBEDDING_MODEL {model_name!r} isn't a FastEmbed model. Change it in .env, or leave it empty "
             f"to use {DEFAULT_LOCAL_EMBEDDING_MODEL}."
         )
-    # model_construct hands over a model we've already loaded. The wrapper's own loader looks up
-    # the installed package by name, and crashes if only the other of fastembed/fastembed-gpu exists.
-    return FastEmbedEmbeddings.model_construct(
-        model_name=model_name,
-        cache_dir=cache_dir,
-        model=_load_text_embedding(model_name, cache_dir, device),
-    )
+    return LocalEmbeddings(model_name, _load_text_embedding(model_name, cache_dir, device))
 
 
 def get_embeddings() -> Embeddings:

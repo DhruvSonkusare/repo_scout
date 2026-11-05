@@ -14,7 +14,7 @@ def test_health_ok_when_database_responds() -> None:
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "db": "ok", "llm_provider": "fake"}
+    assert response.json() == {"status": "ok", "db": "ok", "models": "ok", "llm_provider": "fake"}
 
 
 def test_health_reports_error_when_database_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

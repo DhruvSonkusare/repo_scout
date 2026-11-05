@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import Conversation, Message, Repo
-from app.llm import FAKE_CHAT_RESPONSES, FAKE_MODEL_NAME
+from app.llm import FAKE_CHAT_RESPONSES, FAKE_MODEL_NAME, validate_model_chains
 from app.main import app
 from app.rag import format_docs, retrieve
 from tests.conftest import FakeGemini, RecordingChatModel
@@ -368,6 +368,17 @@ def test_gemini_error_becomes_an_error_event_and_saves_no_answer(
     assert events[-1]["type"] == "error"
     assert "Every configured model" in events[-1]["message"]
     assert [message.role for message in db_session.query(Message).all()] == ["user"]
+
+
+def test_an_empty_model_chain_explains_itself_in_the_error_event(fake_gemini: FakeGemini) -> None:
+    repo = client.post("/api/repos", json={"url": "https://github.com/acme/sample"}).json()
+    fake_gemini.listed_models = {"something-else": ["generateContent"]}
+    validate_model_chains()
+
+    events = ask(repo["id"])
+
+    assert events[-1]["type"] == "error"
+    assert "CHAT_MODELS has no usable models" in events[-1]["message"]
 
 
 def test_unexpected_error_hides_details_from_users(repo_id: int, monkeypatch: pytest.MonkeyPatch) -> None:

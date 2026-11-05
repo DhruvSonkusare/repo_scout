@@ -110,8 +110,12 @@ class Search(Base):
     plan: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # Best match first. The id keeps equal scores in the order they were saved.
     results: Mapped[list["SearchResult"]] = relationship(
-        back_populates="search", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="search",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="(SearchResult.score.desc(), SearchResult.id)",
     )
 
 

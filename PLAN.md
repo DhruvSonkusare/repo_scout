@@ -22,7 +22,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 | `repos` | id, url (unique), name (`owner/repo`), status (`pending/cloning/indexing/ready/failed`), error, file_count, chunk_count, chunks_embedded (progress), embedding_provider, embedding_model, languages (JSONB), onboarding_guide (text), created_at |
 | `conversations` | id, repo_id → repos, title, created_at |
 | `messages` | id, conversation_id → conversations, role (`user/ai`), content, sources (JSONB list), created_at |
-| `searches` | id, problem (text), plan (JSONB: queries/language/keywords), created_at |
+| `searches` | id, problem (text), plan (JSONB: queries/language/must_have), created_at |
 | `search_results` | id, search_id → searches, full_name, url, description, stars, language, last_pushed, score (0–100), why_it_fits, caveats, how_to_start (JSONB list of strings), repo_id → repos (nullable, set when indexed), problem_guide (text, nullable) |
 
 ## Reference: API
@@ -53,7 +53,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 > Read CLAUDE.md. Set up the project skeleton: create the folder layout from CLAUDE.md with
 > empty modules, `requirements.txt` (fastapi, uvicorn[standard], sqlalchemy>=2, psycopg[binary]>=3,
 > alembic, pydantic-settings, httpx, langchain-core, langchain-text-splitters,
-> langchain-google-genai, langchain-chroma, langchain-community, fastembed, chromadb, python-dotenv, pytest, pytest-cov), `.env.example`
+> langchain-google-genai, langchain-chroma, fastembed, chromadb, python-dotenv, pytest, pytest-cov), `.env.example`
 > (DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide,
 > TEST_DATABASE_URL=postgresql+psycopg://repoguide:repoguide@localhost:5432/repoguide_test,
 > GOOGLE_API_KEY, GITHUB_TOKEN, LLM_PROVIDER=gemini, CHAT_MODELS, GUIDE_MODELS, EMBEDDING_PROVIDER=local, EMBEDDING_MODEL, DATA_DIR=./data),
@@ -116,7 +116,7 @@ migration is and why production apps never use `create_all()`, and JSONB vs JSON
 > Implement `app/llm.py` with `get_chat_model()`, `get_guide_model()`, `get_structured_model()` and
 > `get_embeddings()`. Provider "gemini" uses `ChatGoogleGenerativeAI` (temperature 0.2) in `.with_fallbacks()`
 > chains from `CHAT_MODELS` and `GUIDE_MODELS`. `EMBEDDING_PROVIDER` chooses embeddings separately: "local"
-> (the default) uses `FastEmbedEmbeddings` with `jinaai/jina-embeddings-v2-base-code` unless `EMBEDDING_MODEL`
+> (the default) uses a small `Embeddings` class around FastEmbed's `TextEmbedding` with `jinaai/jina-embeddings-v2-base-code` unless `EMBEDDING_MODEL`
 > names another model, on the device set by `EMBEDDING_DEVICE` (auto, cuda or cpu; `requirements-gpu.txt`
 > installs the CUDA build), and "gemini" uses `GoogleGenerativeAIEmbeddings`. Provider
 > "fake" uses `FakeListChatModel` and `DeterministicFakeEmbedding(size=256)`. Add a tiny script

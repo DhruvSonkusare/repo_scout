@@ -15,7 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from app.config import get_settings
 from app.db import Message, Repo, SessionLocal
 from app.ingest import build_file_tree
-from app.llm import GEMINI_ERRORS, describe_gemini_error, get_chat_model, get_guide_model
+from app.llm import GEMINI_ERRORS, ModelSetupError, describe_gemini_error, get_chat_model, get_guide_model
 from app.vectorstore import get_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,8 @@ async def stream_answer(
         yield _event(type="done", message_id=message_id, model=model)
     except GEMINI_ERRORS as error:
         yield _event(type="error", message=describe_gemini_error(error))
+    except ModelSetupError as error:
+        yield _event(type="error", message=str(error))
     except Exception:
         logger.exception("Answering a question about repo %s failed", repo_id)
         yield _event(type="error", message="Something went wrong on the server. See the server log for details.")

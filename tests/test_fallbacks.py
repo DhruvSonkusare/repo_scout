@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from google.genai.errors import ClientError, ServerError
 from langchain_core.language_models import FakeListChatModel
 from langchain_core.messages import AIMessageChunk, AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 from app.config import Settings
 from app.llm import (
     ModelProfile,
+    ModelSetupError,
     ModelUnavailableError,
     _merge_system_prompt,
     circuit_breaker,
@@ -25,9 +27,12 @@ from app.llm import (
     get_chat_model,
     get_guide_model,
     get_structured_model,
+    model_chain_problem,
     model_profile,
     next_quota_reset,
+    validate_model_chains,
 )
+from app.main import app
 from tests.conftest import FakeGemini
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
@@ -170,8 +175,8 @@ def test_fake_provider_needs_no_model_names() -> None:
 
 
 @pytest.mark.parametrize("run", RUNNERS)
-@pytest.mark.parametrize("status", [429, 503])
-def test_temporary_errors_fall_back_to_the_next_model(
+@pytest.mark.parametrize("status", [404, 429, 500, 503, 504])
+def test_unavailable_models_fall_back_to_the_next_model(
     models: Models, run: Callable[[Runnable], str], status: int
 ) -> None:
     models.errors["a"] = gemini_error(status)
@@ -189,7 +194,7 @@ def test_several_models_can_fail_in_a_row(models: Models, run: Callable[[Runnabl
 
 
 @pytest.mark.parametrize("run", RUNNERS)
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 504])
+@pytest.mark.parametrize("status", [400, 401, 403, 502])
 def test_other_errors_never_fall_back(models: Models, run: Callable[[Runnable], str], status: int) -> None:
     models.errors["a"] = gemini_error(status)
 
@@ -300,7 +305,7 @@ def test_rate_limit_uses_the_delay_gemini_suggests(models: Models, clock: Clock)
     assert not circuit_breaker.is_open("a")
 
 
-@pytest.mark.parametrize("status", [503, 400])
+@pytest.mark.parametrize("status", [400, 500, 503, 504])
 def test_other_errors_do_not_open_the_breaker(models: Models, monkeypatch: pytest.MonkeyPatch, status: int) -> None:
     monkeypatch.setenv("CHAT_MODELS", "a")
     models.errors["a"] = gemini_error(status)
@@ -309,6 +314,58 @@ def test_other_errors_do_not_open_the_breaker(models: Models, monkeypatch: pytes
         get_chat_model().invoke("Hi")
 
     assert not circuit_breaker.is_open("a")
+
+
+@pytest.mark.parametrize("run", RUNNERS)
+def test_a_404_disables_the_model_until_restart_and_logs_an_error(
+    models: Models, clock: Clock, caplog: pytest.LogCaptureFixture, run: Callable[[Runnable], str]
+) -> None:
+    models.errors["a"] = gemini_error(404)
+
+    assert run(get_chat_model()) == "answer from b"
+
+    errors = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert errors == ["Model a was not found or is unavailable (HTTP 404). Disabled until restart."]
+    models.calls.clear()
+    models.errors.clear()
+    clock.now += 10 * 365 * 24 * 3600
+    assert run(get_chat_model()) == "answer from b"
+    assert models.calls == ["b"]
+
+
+def test_a_restart_forgets_a_disabled_model(models: Models) -> None:
+    models.errors["a"] = gemini_error(404)
+    get_chat_model().invoke("Hi")
+    models.errors.clear()
+
+    circuit_breaker.reset()
+
+    assert get_chat_model().invoke("Hi").text == "answer from a"
+
+
+def test_a_chain_with_every_model_disabled_fails_health(models: Models, fake_gemini: FakeGemini) -> None:
+    for name in ["chat-model-name", "guide-model-name"]:
+        circuit_breaker.disable(name)
+
+    problem = model_chain_problem()
+
+    assert "CHAT_MODELS has no usable models" in problem
+    assert "GUIDE_MODELS has no usable models" in problem
+    with pytest.raises(ModelSetupError, match="restart the server"):
+        get_chat_model()
+
+
+def test_a_disabled_model_leaves_the_last_working_model_retrying(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "first,gone")
+    circuit_breaker.disable("gone")
+    fake_gemini.statuses_by_model["first"] = 503
+
+    with pytest.raises(ModelUnavailableError):
+        get_chat_model().invoke("Hi")
+
+    assert fake_gemini.models_called() == ["first", "first"]  # MAX_RETRIES is 1
 
 
 def test_the_breaker_is_shared_between_chains(models: Models, clock: Clock) -> None:
@@ -459,7 +516,8 @@ def test_models_are_only_built_when_their_turn_comes(monkeypatch: pytest.MonkeyP
         ("gemini-2.5-flash-lite", ModelProfile(thinking="budget")),
         ("gemini-2.0-flash", ModelProfile()),
         ("gemma-4-31b-it", ModelProfile(system_prompt=False, structured_output=False)),
-        ("antigravity-preview-09-2026", ModelProfile(structured_output=False)),
+        ("some-new-model", ModelProfile(structured_output=False)),
+        ("fake-model", ModelProfile()),
     ],
 )
 def test_model_profiles(name: str, expected: ModelProfile) -> None:
@@ -534,6 +592,25 @@ def test_each_family_gets_its_own_thinking_option(
     assert config == expected
 
 
+def test_chat_and_guide_chains_use_their_own_thinking_levels(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "gemini-3-chat")
+    monkeypatch.setenv("GUIDE_MODELS", "gemini-3-guide")
+    monkeypatch.setenv("CHAT_THINKING_LEVEL", "minimal")
+    monkeypatch.setenv("GUIDE_THINKING_LEVEL", "high")
+
+    get_chat_model().invoke("Hi")
+    get_guide_model().invoke("Hi")
+
+    assert request_for(fake_gemini, "gemini-3-chat")["generationConfig"]["thinkingConfig"] == {
+        "thinking_level": "MINIMAL"
+    }
+    assert request_for(fake_gemini, "gemini-3-guide")["generationConfig"]["thinkingConfig"] == {
+        "thinking_level": "HIGH"
+    }
+
+
 @pytest.mark.parametrize("model", ["gemini-3-flash", "gemini-2.5-flash-lite"])
 def test_default_thinking_sends_nothing_on_any_family(
     fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, model: str
@@ -592,11 +669,16 @@ def test_real_client_daily_quota_opens_the_breaker_until_the_reset(
     assert not circuit_breaker.is_open("first")
 
 
-def test_real_client_stream_falls_back(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("status", [404, 500, 503, 504])
+@pytest.mark.parametrize("run", RUNNERS)
+def test_real_client_errors_fall_back_on_every_path(
+    fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, run: Callable[[Runnable], str], status: int
+) -> None:
     monkeypatch.setenv("CHAT_MODELS", "first,second")
-    fake_gemini.statuses_by_model["first"] = 503
+    monkeypatch.setenv("MAX_RETRIES", "0")
+    fake_gemini.statuses_by_model["first"] = status
 
-    assert run_astream(get_chat_model()) == "hello"
+    assert run(get_chat_model()) == "hello"
     assert fake_gemini.models_called() == ["first", "second"]
 
 
@@ -613,6 +695,153 @@ def test_real_client_400_does_not_fall_back(
     assert not isinstance(error.value, ModelUnavailableError)
     assert "rejected the request" in describe_gemini_error(error.value)
     assert fake_gemini.models_called() == ["first"]
+
+
+# --- checking model names at startup
+
+
+def list_models(fake_gemini: FakeGemini, *names: str) -> None:
+    """Make the model list contain these names, all able to generate text."""
+    fake_gemini.listed_models = {name: ["generateContent"] for name in names}
+
+
+@pytest.fixture
+def chains(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> FakeGemini:
+    """Configure a chat chain of wrong-name and real-name, and a guide chain of real-name."""
+    monkeypatch.setenv("CHAT_MODELS", "wrong-name,real-name")
+    monkeypatch.setenv("GUIDE_MODELS", "real-name")
+    return fake_gemini
+
+
+def test_unknown_names_are_dropped_with_a_warning(chains: FakeGemini, caplog: pytest.LogCaptureFixture) -> None:
+    list_models(chains, "real-name")
+
+    validate_model_chains()
+
+    get_chat_model().invoke("Hi")
+    assert chains.models_called() == ["real-name"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "CHAT_MODELS" in warnings[0] and "'wrong-name'" in warnings[0]
+    assert model_chain_problem() is None
+
+
+def test_model_names_can_have_the_models_prefix(chains: FakeGemini, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHAT_MODELS", "models/real-name")
+    list_models(chains, "real-name")
+
+    validate_model_chains()
+
+    assert model_chain_problem() is None
+
+
+def test_a_model_that_cannot_generate_text_counts_as_unknown(chains: FakeGemini) -> None:
+    chains.listed_models = {"real-name": ["generateContent"], "wrong-name": ["embedContent"]}
+
+    validate_model_chains()
+
+    get_chat_model().invoke("Hi")
+    assert chains.models_called() == ["real-name"]
+
+
+def test_validating_again_forgets_old_results(chains: FakeGemini) -> None:
+    list_models(chains, "real-name")
+    validate_model_chains()
+    list_models(chains, "real-name", "wrong-name")
+
+    validate_model_chains()
+
+    get_chat_model().invoke("Hi")
+    assert chains.models_called() == ["wrong-name"]
+
+
+def test_startup_finding_empty_chains_fails_health_and_names_them(chains: FakeGemini) -> None:
+    list_models(chains, "something-else")
+
+    with TestClient(app) as started:
+        response = started.get("/api/health")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["db"] == "ok"
+    assert "CHAT_MODELS has no usable models" in body["models"]
+    assert "GUIDE_MODELS has no usable models" in body["models"]
+    assert "wrong-name" in body["models"]
+
+
+def test_startup_with_usable_chains_passes_health(chains: FakeGemini) -> None:
+    list_models(chains, "real-name")
+
+    with TestClient(app) as started:
+        response = started.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["models"] == "ok"
+
+
+def test_an_empty_chain_explains_itself_when_used(chains: FakeGemini) -> None:
+    list_models(chains, "something-else")
+    validate_model_chains()
+
+    with pytest.raises(ModelSetupError, match="CHAT_MODELS has no usable models"):
+        get_chat_model()
+    with pytest.raises(ModelSetupError, match="GUIDE_MODELS has no usable models"):
+        get_guide_model()
+
+
+def test_one_empty_chain_fails_health_and_names_only_that_one(
+    chains: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GUIDE_MODELS", "wrong-name")
+    list_models(chains, "real-name")
+
+    validate_model_chains()
+
+    problem = model_chain_problem()
+    assert "GUIDE_MODELS has no usable models" in problem
+    assert "CHAT_MODELS" not in problem
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_a_failed_model_list_keeps_every_model(
+    chains: FakeGemini, caplog: pytest.LogCaptureFixture, status: int
+) -> None:
+    chains.list_status = status
+
+    validate_model_chains()
+
+    assert model_chain_problem() is None
+    assert "Couldn't check the model names" in caplog.text
+    get_chat_model().invoke("Hi")
+    assert chains.models_called() == ["wrong-name"]
+
+
+def test_listing_models_makes_no_generation_calls(chains: FakeGemini) -> None:
+    list_models(chains, "real-name")
+
+    validate_model_chains()
+
+    assert chains.requests == []
+
+
+def test_the_fake_provider_skips_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(api_key: str) -> set[str]:
+        raise AssertionError("the fake provider must stay offline")
+
+    monkeypatch.setattr("app.llm._list_generation_models", fail)
+    monkeypatch.setenv("CHAT_MODELS", "anything")
+
+    validate_model_chains()
+
+    assert model_chain_problem() is None
+
+
+@pytest.mark.parametrize("variable", ["GOOGLE_API_KEY", "CHAT_MODELS", "GUIDE_MODELS"])
+def test_missing_settings_fail_health(fake_gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
+    monkeypatch.setenv(variable, "")
+
+    assert f"{variable} is not set" in model_chain_problem()
 
 
 # --- structured output

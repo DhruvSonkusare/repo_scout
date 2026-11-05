@@ -21,7 +21,7 @@ tests and a good README matter as much as features.
   (`postgresql+psycopg://...`). JSON fields use `JSONB`, timestamps use `DateTime(timezone=True)`.
 - **Alembic** for schema migrations. Never use `create_all()` in the app; every model
   change gets a new migration (`alembic revision --autogenerate -m "..."`).
-- **LangChain** (`langchain-core`, `langchain-text-splitters`, `langchain-google-genai`, `langchain-community`,
+- **LangChain** (`langchain-core`, `langchain-text-splitters`, `langchain-google-genai`,
   `langchain-chroma`) with **Google Gemini** for chat and **FastEmbed** for embeddings, running locally by
   default (`EMBEDDING_PROVIDER`: `local` | `gemini` | `fake`; `EMBEDDING_MODEL` picks the model). The default
   model is `jinaai/jina-embeddings-v2-base-code`. Gemini embeddings stay available, but the free tier's
@@ -31,13 +31,15 @@ tests and a good README matter as much as features.
   conflict, so a venv has one or the other. Install the GPU build with `scripts/install_gpu.ps1`, because
   `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU with a log line.
 - `CHAT_MODELS` and `GUIDE_MODELS` are comma-separated fallback chains, built with `.with_fallbacks()` in
-  `app/llm.py`. Only a 429 or 503 moves to the next model, and only before the first streamed token. An in-memory
-  circuit breaker skips a model until midnight Pacific after a daily-quota error, and for about 60 s after a rate
-  limit. `model_profile()` sets what each family accepts: thinking, system prompts (Gemma's are merged into the first
+  `app/llm.py`. Only a 404, 429, 500, 503 or 504 moves to the next model, never a 400, and only before the first
+  streamed token. An in-memory circuit breaker skips a model until midnight Pacific after a daily-quota error, for
+  about 60 s after a rate limit, and until restart after a 404 (which also logs an error). `model_profile()` sets what each family accepts: thinking, system prompts (Gemma's are merged into the first
   user message) and structured output. Answers record their model in `messages.model` and the `done` event.
-- `CHAT_THINKING_LEVEL` (`default` | `minimal` | `low` | `medium` | `high`, default `minimal`) sets how much
-  Gemini reasons before answering: a `thinking_level` for Gemini 3, a `thinking_budget` for 2.5, nothing for Gemma.
-  `default` sends nothing.
+  Startup checks the names against `models.list` and drops unknown ones with a warning. If a chain ends up empty,
+  `/api/health` returns a 503 that names it. If the list can't be fetched, every model stays.
+- `CHAT_THINKING_LEVEL` (default `minimal`) and `GUIDE_THINKING_LEVEL` (default `low`) set how much Gemini reasons
+  before answering (`default` | `minimal` | `low` | `medium` | `high`): a `thinking_level` for Gemini 3, a
+  `thinking_budget` for 2.5, nothing for Gemma. `default` sends nothing.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from fastembed import TextEmbedding
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import FakeListChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -87,7 +88,7 @@ def gemini_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
 
 def test_tests_run_on_the_fake_provider() -> None:
-    assert isinstance(_build_chat_model("any-name", is_last=True), FakeListChatModel)
+    assert isinstance(_build_chat_model("any-name", True, "minimal"), FakeListChatModel)
 
 
 def test_fake_chat_model_works_in_an_lcel_chain() -> None:
@@ -155,8 +156,23 @@ def test_local_embeddings_need_no_gemini_settings(monkeypatch: pytest.MonkeyPatc
 def test_local_embeddings_embed_through_the_langchain_interface() -> None:
     embeddings = get_embeddings()
 
+    assert isinstance(embeddings, Embeddings)
     assert embeddings.embed_documents(["one", "two"]) == [[0.5, 0.5], [0.5, 0.5]]
     assert embeddings.embed_query("one") == [0.5, 0.5]
+
+
+@pytest.mark.usefixtures("local_env")
+def test_local_embeddings_use_the_query_method_for_searches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(StubTextEmbedding, "query_embed", lambda self, text: iter([np.array([0.9, 0.1])]))
+    embeddings = get_embeddings()
+
+    assert embeddings.embed_query("one") == pytest.approx([0.9, 0.1])
+    assert embeddings.embed_documents(["one"]) == [[0.5, 0.5]]
+
+
+@pytest.mark.usefixtures("local_env")
+def test_local_embeddings_handle_no_documents() -> None:
+    assert get_embeddings().embed_documents([]) == []
 
 
 def test_gemini_model_name_on_the_local_provider_explains_itself(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,7 +298,7 @@ def test_embedding_identity_ignores_the_device(local_env: pytest.MonkeyPatch) ->
 
 @pytest.mark.usefixtures("gemini_env")
 def test_gemini_chat_model_uses_settings() -> None:
-    model = _build_chat_model("chat-model-name", is_last=True)
+    model = _build_chat_model("chat-model-name", True, "minimal")
 
     assert isinstance(model, ChatGoogleGenerativeAI)
     assert model.model.endswith("chat-model-name")
@@ -298,22 +314,27 @@ def test_minimal_is_the_default_thinking_level(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.parametrize("level", ["minimal", "low", "medium", "high"])
-def test_thinking_level_setting_reaches_the_chat_model(gemini_env: pytest.MonkeyPatch, level: str) -> None:
-    gemini_env.setenv("CHAT_THINKING_LEVEL", level)
-
-    assert _build_chat_model("gemini-3-flash", is_last=True).thinking_level == level
-
-
-def test_default_thinking_level_sends_nothing(gemini_env: pytest.MonkeyPatch) -> None:
-    gemini_env.setenv("CHAT_THINKING_LEVEL", "default")
-
-    assert _build_chat_model("gemini-3-flash", is_last=True).thinking_level is None
+@pytest.mark.usefixtures("gemini_env")
+def test_thinking_level_reaches_the_gemini_model(level: str) -> None:
+    assert _build_chat_model("gemini-3-flash", True, level).thinking_level == level
 
 
-def test_thinking_level_rejects_unknown_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CHAT_THINKING_LEVEL", "extreme")
+@pytest.mark.usefixtures("gemini_env")
+def test_default_thinking_level_sends_nothing() -> None:
+    assert _build_chat_model("gemini-3-flash", True, "default").thinking_level is None
 
-    with pytest.raises(ValueError, match="chat_thinking_level"):
+
+def test_low_is_the_default_guide_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GUIDE_THINKING_LEVEL", raising=False)
+
+    assert Settings(_env_file=None).guide_thinking_level == "low"
+
+
+@pytest.mark.parametrize("setting", ["chat_thinking_level", "guide_thinking_level"])
+def test_thinking_levels_reject_unknown_values(monkeypatch: pytest.MonkeyPatch, setting: str) -> None:
+    monkeypatch.setenv(setting.upper(), "extreme")
+
+    with pytest.raises(ValueError, match=setting):
         Settings(_env_file=None)
 
 
