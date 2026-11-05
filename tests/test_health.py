@@ -1,11 +1,13 @@
 """Tests for GET /api/health against real Postgres."""
 
+import warnings
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from app.db import engine
-from app.main import app
+from app.main import app, ignore_known_warnings
 
 client = TestClient(app)
 
@@ -28,3 +30,13 @@ def test_health_reports_error_when_database_is_unavailable(monkeypatch: pytest.M
     body = response.json()
     assert body["status"] == "error"
     assert "repoguide_missing_database" in body["db"]
+
+
+def test_the_known_dependency_warning_is_ignored_and_others_are_not() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ignore_known_warnings()
+        warnings.warn("coroutine 'ClientResponse.json' was never awaited", RuntimeWarning, stacklevel=1)
+        warnings.warn("coroutine 'our_own_function' was never awaited", RuntimeWarning, stacklevel=1)
+
+    assert [str(warning.message) for warning in caught] == ["coroutine 'our_own_function' was never awaited"]

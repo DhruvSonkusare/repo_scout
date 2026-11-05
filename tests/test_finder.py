@@ -23,9 +23,9 @@ from app.db import Repo, Search, SearchResult
 from app.finder.chains import (
     MAX_CANDIDATES,
     MAX_README_CHARS_FOR_RERANK,
-    MAX_README_CHARS_FOR_SECOND_RERANK,
     MIN_CANDIDATES,
     NOT_ASSESSED_REASON,
+    RERANK_BATCHES,
     PLANNER_PROMPT,
     PROBLEM_EXCERPT_K,
     PROBLEM_GUIDE_PROBE_K,
@@ -120,8 +120,8 @@ class FakeLLM:
             subject="pdf", queries=["pdf table", "tabular pdf"], language=None, must_have=["reads tables"]
         )
         self.ranking: Ranking | None = None
-        self.later_rankings: list[Ranking | Exception] = []  # replies to the calls after the first
-        self.ranking_calls = 0
+        self.failing_repos: dict[str, Exception] = {}  # a batch containing this repo raises this
+        self.ranking_prompts: list[str] = []  # the system prompt of each reranker call
         self.errors: dict[type, Exception] = {}
         self.prompts: dict[type, list[BaseMessage]] = {}
 
@@ -132,12 +132,11 @@ class FakeLLM:
                 raise self.errors[schema]
             if schema is SearchPlan:
                 return self.plan
-            self.ranking_calls += 1
-            if self.ranking_calls > 1 and self.later_rankings:
-                later = self.later_rankings.pop(0)
-                if isinstance(later, Exception):
-                    raise later
-                return later
+            system = prompt.to_messages()[0].content
+            self.ranking_prompts.append(system)
+            for name, error in self.failing_repos.items():
+                if f"### {name}\n" in system:
+                    raise error
             return self.ranking if self.ranking is not None else fake_reply(prompt)
 
         return RunnableLambda(reply)
@@ -454,37 +453,67 @@ def test_clean_limits_the_start_steps() -> None:
 # --- no silent drops
 
 
-def test_left_out_candidates_get_a_second_smaller_call(llm: FakeLLM) -> None:
-    llm.ranking = Ranking(results=[assessment("acme/a", 90)])
-    llm.later_rankings = [Ranking(results=[assessment("acme/b", 95)])]
-    candidates = [candidate("acme/a"), candidate("acme/b", "r" * (MAX_README_CHARS_FOR_SECOND_RERANK + 100))]
+def repos_in(prompt: str) -> list[str]:
+    """Return the repos a reranker prompt asks about."""
+    return [line.removeprefix("### ") for line in prompt.splitlines() if line.startswith("### ")]
+
+
+def test_candidates_are_split_evenly_into_batches_that_take_turns(llm: FakeLLM) -> None:
+    candidates = [candidate(f"acme/{number}") for number in range(5)]
+
+    asyncio.run(rank_candidates("Anything", llm.plan, candidates))
+
+    assert RERANK_BATCHES == 2
+    assert sorted(repos_in(prompt) for prompt in llm.ranking_prompts) == [
+        ["acme/0", "acme/2", "acme/4"],
+        ["acme/1", "acme/3"],
+    ]
+    counts = sorted("There are 3 candidates" in prompt for prompt in llm.ranking_prompts)
+    assert counts == [False, True]
+
+
+def test_the_batches_run_at_the_same_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    running = 0
+    most_running = 0
+
+    async def fake_assess(problem: str, plan: SearchPlan, batch: list[Candidate]) -> list[RepoAssessment]:
+        nonlocal running, most_running
+        running += 1
+        most_running = max(most_running, running)
+        await asyncio.sleep(0)
+        running -= 1
+        return [assessment(item.repo.full_name) for item in batch]
+
+    monkeypatch.setattr("app.finder.chains._assess", fake_assess)
+    plan = SearchPlan(subject="pdf", queries=["pdf"])
+
+    results = asyncio.run(rank_candidates("Anything", plan, [candidate("acme/a"), candidate("acme/b")]))
+
+    assert most_running == 2
+    assert len(results) == 2
+
+
+def test_results_from_both_batches_are_sorted_together(llm: FakeLLM) -> None:
+    llm.ranking = Ranking(results=[assessment("acme/a", 40), assessment("acme/b", 95), assessment("acme/c", 70)])
+    candidates = [candidate("acme/a"), candidate("acme/b"), candidate("acme/c")]
 
     results = asyncio.run(rank_candidates("Anything", llm.plan, candidates))
 
-    assert llm.ranking_calls == 2
-    assert [(item.full_name, item.score) for item in results] == [("acme/b", 95), ("acme/a", 90)]
-    second_prompt = llm.prompts[Ranking][0].content
-    assert "### acme/a" not in second_prompt
-    assert "There are 1 candidates" in second_prompt
-    assert "r" * MAX_README_CHARS_FOR_SECOND_RERANK in second_prompt
-    assert "r" * (MAX_README_CHARS_FOR_SECOND_RERANK + 1) not in second_prompt
+    assert [(item.full_name, item.score) for item in results] == [("acme/b", 95), ("acme/c", 70), ("acme/a", 40)]
 
 
-def test_a_complete_ranking_makes_one_call(llm: FakeLLM) -> None:
-    llm.ranking = Ranking(results=[assessment("acme/a")])
-
+def test_one_candidate_makes_one_call(llm: FakeLLM) -> None:
     asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a")]))
 
-    assert llm.ranking_calls == 1
+    assert len(llm.ranking_prompts) == 1
 
 
-def test_candidates_left_out_twice_are_marked_not_assessed(llm: FakeLLM) -> None:
+def test_left_out_candidates_are_marked_not_assessed_after_the_scored_ones(llm: FakeLLM) -> None:
     llm.ranking = Ranking(results=[assessment("acme/a", 20)])
-    llm.later_rankings = [Ranking(results=[])]
 
-    results = asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
+    results = asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/b"), candidate("acme/a")]))
 
-    assert llm.ranking_calls == 2
+    assert len(llm.ranking_prompts) == 2  # nothing is asked again
     assert [(item.full_name, item.score) for item in results] == [("acme/a", 20), ("acme/b", None)]
     assert results[1].why_it_fits == NOT_ASSESSED_REASON
     assert results[1].how_to_start == []
@@ -497,22 +526,36 @@ def test_candidates_left_out_twice_are_marked_not_assessed(llm: FakeLLM) -> None
         OutputParserException("not JSON"),
     ],
 )
-def test_a_failed_second_call_keeps_the_first_results(
+def test_a_failed_batch_only_affects_its_own_repos(
     llm: FakeLLM, caplog: pytest.LogCaptureFixture, error: Exception
 ) -> None:
-    llm.ranking = Ranking(results=[assessment("acme/a", 80)])
-    llm.later_rankings = [error]
+    llm.ranking = Ranking(results=[assessment("acme/a", 80), assessment("acme/b", 90)])
+    llm.failing_repos["acme/b"] = error
 
     results = asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
 
     assert [(item.full_name, item.score) for item in results] == [("acme/a", 80), ("acme/b", None)]
-    assert "second reranker call failed" in caplog.text
+    assert "A reranker batch failed" in caplog.text
+
+
+def test_every_batch_failing_raises_the_error(llm: FakeLLM) -> None:
+    error = ServerError(503, {"error": {"code": 503, "message": "test"}})
+    llm.failing_repos = {"acme/a": error, "acme/b": error}
+
+    with pytest.raises(ServerError):
+        asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
+
+
+def test_a_bug_in_a_batch_is_not_hidden_as_not_assessed(llm: FakeLLM) -> None:
+    llm.failing_repos["acme/a"] = KeyError("a bug")
+
+    with pytest.raises(KeyError):
+        asyncio.run(rank_candidates("Anything", llm.plan, [candidate("acme/a"), candidate("acme/b")]))
 
 
 def test_not_assessed_results_are_saved_and_listed_after_the_low_scores(github: FakeGitHub, llm: FakeLLM) -> None:
     github.items_by_query["pdf table"] = [github_item("acme/low"), github_item("acme/left-out")]
     llm.ranking = Ranking(results=[assessment("acme/low", 5)])
-    llm.later_rankings = [Ranking(results=[])]
 
     created = search()
 

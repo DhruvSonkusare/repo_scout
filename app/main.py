@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,23 @@ from app.llm import close_models, model_chain_problem, validate_model_chains
 from app.routers import chat, finder, guide, repos
 
 logger = logging.getLogger(__name__)
+
+
+def ignore_known_warnings() -> None:
+    """Keep a harmless warning from a dependency out of the server log. pytest.ini has the same filter.
+
+    langchain-core's _generate_response_from_error calls response.json() without await, for error
+    metadata it only passes to callbacks. The Google client's async errors carry an aiohttp response,
+    whose json() is a coroutine, so that coroutine is created and never run. It does no I/O and our
+    error handling doesn't use it. langchain-core 1.7.6 and google-genai 2.34.0 have no fix to pin.
+    Draft upstream report: docs/upstream-langchain-issue.md.
+    """
+    warnings.filterwarnings(
+        "ignore", message="coroutine 'ClientResponse.json' was never awaited", category=RuntimeWarning
+    )
+
+
+ignore_known_warnings()
 
 # Uvicorn only configures its own loggers, so without this our INFO lines wouldn't appear.
 logging.basicConfig(format="%(levelname)s:     %(name)s: %(message)s")

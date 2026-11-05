@@ -265,9 +265,9 @@ and the 15–20 README fetches per search count against a limit of 60 API reques
 >   short steps) and `Ranking(results: list[RepoAssessment])`; a RERANK_PROMPT that judges
 >   each candidate (description + topics + README excerpt) AGAINST THE USER'S PROBLEM, is
 >   honest when nothing fits well, and never invents features not in the README. After the LLM call,
->   drop any assessment whose full_name isn't in the candidate list. No silent drops: candidates the
->   model left out get a second, smaller call, and any still missing are saved with score NULL and
->   marked "not assessed", after the scored results.
+>   drop any assessment whose full_name isn't in the candidate list. No silent drops: candidates are split
+>   into 2 batches scored concurrently with `asyncio.gather`, and any still missing are saved with
+>   score NULL and marked "not assessed", after the scored results.
 > - Make the fake provider work: when LLM_PROVIDER=fake, return a fixed SearchPlan/Ranking.
 > Then add `app/routers/finder.py`: POST `/api/finder/search {problem}` saves `searches` +
 > `search_results` and returns results sorted by score; GET searches list and detail.

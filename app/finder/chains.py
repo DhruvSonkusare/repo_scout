@@ -110,8 +110,8 @@ MAX_CANDIDATES = 20
 # Fewer candidates than this means the queries were too narrow, so one broader search runs.
 MIN_CANDIDATES = 8
 MAX_README_CHARS_FOR_RERANK = 1500
-# The second call only covers repos the first one left out, so it can read less about each.
-MAX_README_CHARS_FOR_SECOND_RERANK = 500
+# Models leave repos out of long lists, so each call judges a shorter one.
+RERANK_BATCHES = 2
 STALE_AFTER = timedelta(days=3 * 365)
 MAX_START_STEPS = 4
 NOT_ASSESSED_REASON = "Not assessed: the model returned no assessment for this repo, so it has no score."
@@ -262,7 +262,7 @@ async def find_repos(problem: str) -> tuple[SearchPlan, list[Candidate]]:
     return plan, list(candidates)
 
 
-def _format_candidates(candidates: list[Candidate], readme_chars: int = MAX_README_CHARS_FOR_RERANK) -> str:
+def _format_candidates(candidates: list[Candidate]) -> str:
     """Describe the candidates for the reranker."""
     sections = []
     for candidate in candidates:
@@ -275,7 +275,7 @@ def _format_candidates(candidates: list[Candidate], readme_chars: int = MAX_READ
             f"Last commit: {pushed}.\n"
             f"Description: {repo.description or '(none)'}\n"
             f"Topics: {', '.join(repo.topics) or '(none)'}\n"
-            f"README excerpt:\n````\n{candidate.readme[:readme_chars] or '(no README)'}\n````"
+            f"README excerpt:\n````\n{candidate.readme or '(no README)'}\n````"
         )
     return "\n\n".join(sections)
 
@@ -319,17 +319,15 @@ def _fake_ranking(candidates: list[Candidate]) -> Ranking:
     )
 
 
-async def _assess(
-    problem: str, plan: SearchPlan, candidates: list[Candidate], readme_chars: int
-) -> list[RepoAssessment]:
-    """Ask the model to judge these candidates against the problem."""
+async def _assess(problem: str, plan: SearchPlan, candidates: list[Candidate]) -> list[RepoAssessment]:
+    """Ask the model to judge one batch of candidates against the problem."""
     chain = RERANK_PROMPT | get_structured_model(Ranking, fake_reply=lambda _: _fake_ranking(candidates))
     ranking = await chain.ainvoke(
         {
             "problem": problem,
             "must_have": "; ".join(plan.must_have) or "(nothing specific)",
             "count": len(candidates),
-            "candidates": _format_candidates(candidates, readme_chars),
+            "candidates": _format_candidates(candidates),
         }
     )
     return _clean_ranking(ranking, candidates)
@@ -357,20 +355,33 @@ async def rank_candidates(problem: str, plan: SearchPlan, candidates: list[Candi
 
     This is why we rerank: GitHub sorts by stars, which measures popularity and not fit. Only an
     LLM reading each description and README against this problem can tell them apart. Models can
-    leave candidates out of a long list, so those get a second, smaller call. Any still left are
-    marked as not assessed, and a failed second call can't lose the results of the first.
+    leave candidates out of a long list, so two shorter lists are judged at once with asyncio.gather,
+    in the time of the slower call. Anything still missing is marked as not assessed. One failed
+    batch only affects its own repos: an error is raised only if every batch failed.
     """
     if not candidates:
         return []
-    assessed = await _assess(problem, plan, candidates, MAX_README_CHARS_FOR_RERANK)
+    # Candidates arrive sorted by stars, so taking turns gives both batches a similar mix.
+    batches = [candidates[start::RERANK_BATCHES] for start in range(RERANK_BATCHES)]
+    outcomes = await asyncio.gather(
+        *(_assess(problem, plan, batch) for batch in batches if batch), return_exceptions=True
+    )
+    assessed: list[RepoAssessment] = []
+    errors: list[BaseException] = []
+    for outcome in outcomes:
+        if isinstance(outcome, list):
+            assessed += outcome
+        elif isinstance(outcome, (*GEMINI_ERRORS, ModelSetupError, OutputParserException, ValidationError)):
+            errors.append(outcome)
+        else:
+            raise outcome
+    if errors and len(errors) == len(outcomes):
+        raise errors[0]
+    for error in errors:
+        logger.warning("A reranker batch failed, so marking its repos as not assessed: %s", error)
     missing = _unassessed(candidates, assessed)
     if missing:
-        logger.info("Finder: the reranker left out %d of %d candidates, so asking again.", len(missing), len(candidates))
-        try:
-            assessed += await _assess(problem, plan, missing, MAX_README_CHARS_FOR_SECOND_RERANK)
-        except (*GEMINI_ERRORS, ModelSetupError, OutputParserException, ValidationError) as error:
-            logger.warning("The second reranker call failed, so marking its repos as not assessed: %s", error)
-        missing = _unassessed(candidates, assessed)
+        logger.info("Finder: %d of %d candidates were not assessed.", len(missing), len(candidates))
     ranked = sorted(assessed, key=lambda assessment: assessment.score, reverse=True)
     return [RepoResult(**assessment.model_dump()) for assessment in ranked] + [_not_assessed(item) for item in missing]
 
