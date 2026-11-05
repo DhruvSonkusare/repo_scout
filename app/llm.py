@@ -499,25 +499,45 @@ def get_guide_model() -> Runnable:
     return _model_chain(_chain_names(settings.guide_models, "GUIDE_MODELS"), build)
 
 
-def get_structured_model(schema: type[BaseModel], fake_reply: Callable[[Any], BaseModel] | None = None) -> Runnable:
-    """Return the CHAT_MODELS chain, replying with instances of a Pydantic class.
+def _structured_chain(
+    names: list[str],
+    env_name: str,
+    thinking_level: ThinkingLevel,
+    schema: type[BaseModel],
+    fake_reply: Callable[[Any], BaseModel] | None,
+) -> Runnable:
+    """Chain the models that can reply in a schema's shape.
 
     with_structured_output makes a model reply in the schema's shape and parses the reply into the
     class. Each model needs its own schema request, so it's applied to each model and then those
     are chained, leaving out models that can't do it. The fake provider replies with fake_reply.
     """
-    settings = get_settings()
-    names = _chain_names(settings.chat_models, "CHAT_MODELS")
     capable = [name for name in names if model_profile(name).structured_output]
     if not capable:
-        raise ModelSetupError("No model in CHAT_MODELS supports structured output. Add a Gemini model to it.")
+        raise ModelSetupError(f"No model in {env_name} supports structured output. Add a Gemini model to it.")
 
     def build(name: str, is_last: bool) -> Runnable:
-        if settings.llm_provider == "fake" and fake_reply is not None:
+        if get_settings().llm_provider == "fake" and fake_reply is not None:
             return RunnableLambda(fake_reply)
-        return _build_chat_model(name, is_last, settings.chat_thinking_level).with_structured_output(schema)
+        return _build_chat_model(name, is_last, thinking_level).with_structured_output(schema)
 
     return _model_chain(capable, build)
+
+
+def get_structured_model(schema: type[BaseModel], fake_reply: Callable[[Any], BaseModel] | None = None) -> Runnable:
+    """Return the CHAT_MODELS chain, replying with instances of a Pydantic class."""
+    settings = get_settings()
+    names = _chain_names(settings.chat_models, "CHAT_MODELS")
+    return _structured_chain(names, "CHAT_MODELS", settings.chat_thinking_level, schema, fake_reply)
+
+
+def get_structured_guide_model(
+    schema: type[BaseModel], fake_reply: Callable[[Any], BaseModel] | None = None
+) -> Runnable:
+    """Return the GUIDE_MODELS chain, replying with instances of a Pydantic class, for work on long documents."""
+    settings = get_settings()
+    names = _chain_names(settings.guide_models, "GUIDE_MODELS")
+    return _structured_chain(names, "GUIDE_MODELS", settings.guide_thinking_level, schema, fake_reply)
 
 
 def embedding_identity() -> tuple[str, str]:

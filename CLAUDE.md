@@ -58,14 +58,16 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
     config.py        # pydantic-settings Settings (reads .env)
     db.py            # engine, SessionLocal, Base, ORM models, get_db dependency
     schemas.py       # Pydantic request/response models
-    llm.py           # get_chat_model() / get_guide_model() / get_structured_model() (gemini | fake)
+    llm.py           # get_chat_model() / get_guide_model() / get_structured_model() /
+                     # get_structured_guide_model() (gemini | fake)
                      # get_embeddings() (local | gemini | fake)
     vectorstore.py   # Chroma helpers
     ingest.py        # clone + split + index a repo
     rag.py           # Q&A chain + onboarding guide chain
     finder/
       github.py      # GitHub search + README fetch (httpx)
-      chains.py      # query planner + reranker + problem guide (LangChain)
+      chains.py      # query planner + reranker + problem guide + its verify pass (LangChain)
+      source_context.py # loads the source files a guide relies on, following Python imports
     routers/
       repos.py  chat.py  guide.py  finder.py
   static/            # index.html, style.css, app.js
@@ -74,7 +76,7 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
   alembic.ini
   docker-compose.yml # postgres (+ app later)
   docker/            # init-test-db.sql (creates repoguide_test)
-  scripts/           # manual helpers, e.g. smoke_llm.py
+  scripts/           # manual helpers, e.g. smoke_llm.py, eval_guides.py
   data/              # runtime data (cloned repos, Chroma index), git-ignored
 ```
 

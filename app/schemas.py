@@ -90,6 +90,20 @@ class SearchOut(SearchSummaryOut):
     results: list[SearchResultOut]
 
 
+class GuideVerificationOut(BaseModel):
+    """What checking a guide against the repo's source code found.
+
+    status is verified, failed (the check couldn't finish) or skipped (no source files to check).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: str
+    changed: bool
+    changes: list[str]
+    files_checked: list[str]
+
+
 class ProblemGuideOut(BaseModel):
     """A guide to solving the user's problem with one repo, in Markdown, with what it was written for."""
 
@@ -98,6 +112,8 @@ class ProblemGuideOut(BaseModel):
     repo_id: int
     repo_name: str
     guide: str
+    verdict: str | None  # Fully, Partly or No, if the guide states one
+    verification: GuideVerificationOut
 
 
 class AskRequest(BaseModel):

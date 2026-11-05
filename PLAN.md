@@ -293,8 +293,14 @@ chains concurrently, and why we rerank instead of trusting GitHub stars.
 >    to do, why, and a code snippet adapted from real files (cite file paths)
 > 6. **What you still need to build yourself**
 > 7. **Gotchas and next steps**
+> Base the verdict on code, not the README: if code doesn't confirm a format or step, say so, and say
+> Partly when unsure. Skip built docs (`docs/_build`, HTML in `docs/`) and add searches aimed at entry
+> points and input handling. Then verify: load the source files the guide cites and the modules they
+> import (truncated), and make one more LLM call that checks each claim against that code, fixes
+> contradictions and downgrades the verdict if needed. A guide that couldn't be verified is labelled so.
 > Save to `search_results.problem_guide`. The API response must also return `problem`
-> (the original text) and the repo name next to the guide.
+> (the original text), the repo name, the verdict and whether verification changed anything.
+> `scripts/eval_guides.py` checks guides against expected facts.
 
 **Done when:** from a search result you can index it and get a guide that starts with your
 original problem, gives numbered how-to steps for that exact problem and cites real file paths.

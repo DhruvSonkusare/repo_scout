@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +83,8 @@ README_NAMES = {"readme.md", "readme.rst", "readme.txt", "readme"}
 
 MAX_HISTORY_MESSAGES = 12  # the last 6 turns: one user message and one AI message each
 MMR_FETCH_K = 24
+# A filter can reject most of a search's matches, so filtered searches fetch this many times k.
+FILTERED_FETCH_MULTIPLIER = 4
 # 1 means only relevance and 0 means only variety. LangChain's default of 0.5 dropped the most
 # relevant files on real questions about pallets/click: 5 of 8 found them, against 8 of 8 at 0.85.
 MMR_LAMBDA = 0.85
@@ -156,12 +158,22 @@ def read_readme(root: Path) -> str:
     return ""
 
 
-def collect_excerpts(repo_id: int, searches: list[tuple[str, int]]) -> list[Document]:
-    """Run several (query, k) searches, keeping one copy of chunks found more than once."""
+def collect_excerpts(
+    repo_id: int, searches: list[tuple[str, int]], keep: Callable[[Document], bool] | None = None
+) -> list[Document]:
+    """Run several (query, k) searches, keeping one copy of chunks found more than once.
+
+    With a keep filter, each search returns up to k chunks that pass it.
+    """
     store = get_vectorstore(repo_id)
     unique: dict[tuple[str, int], Document] = {}
     for query, k in searches:
-        for document in store.similarity_search(query, k=k):
+        if keep is None:
+            documents = store.similarity_search(query, k=k)
+        else:
+            matches = store.similarity_search(query, k=k * FILTERED_FETCH_MULTIPLIER)
+            documents = [document for document in matches if keep(document)][:k]
+        for document in documents:
             unique.setdefault((document.metadata["path"], document.metadata["start_line"]), document)
     return list(unique.values())
 

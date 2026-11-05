@@ -22,7 +22,7 @@ from app.ingest import index_repo
 from app.llm import GEMINI_ERRORS, ModelSetupError, describe_gemini_error
 from app.routers.chat import require_searchable
 from app.routers.repos import add_or_get_repo
-from app.schemas import ProblemGuideOut, RepoOut, SearchOut, SearchRequest, SearchSummaryOut
+from app.schemas import GuideVerificationOut, ProblemGuideOut, RepoOut, SearchOut, SearchRequest, SearchSummaryOut
 
 router = APIRouter(prefix="/api/finder", tags=["finder"])
 
@@ -116,7 +116,7 @@ def index_result(
 
 @router.post("/results/{result_id}/guide", response_model=ProblemGuideOut)
 def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> ProblemGuideOut:
-    """Generate the guide for this result and save it, replacing any earlier one. This can take a while."""
+    """Write a guide, check it against the repo's code, and save it, replacing any earlier one. This can take a while."""
     result = _get_result_or_404(db, result_id)
     repo = result.repo
     if repo is None:
@@ -129,8 +129,14 @@ def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> Probl
     except ValueError as error:
         # The model factory raises this when a setting is missing from .env.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
-    result.problem_guide = guide
+    result.problem_guide = guide.guide
     db.commit()
     return ProblemGuideOut(
-        result_id=result.id, problem=result.search.problem, repo_id=repo.id, repo_name=repo.name, guide=guide
+        result_id=result.id,
+        problem=result.search.problem,
+        repo_id=repo.id,
+        repo_name=repo.name,
+        guide=guide.guide,
+        verdict=guide.verdict,
+        verification=GuideVerificationOut.model_validate(guide.verification),
     )

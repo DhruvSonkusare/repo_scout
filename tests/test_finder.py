@@ -28,12 +28,15 @@ from app.finder.chains import (
     RERANK_BATCHES,
     PLANNER_PROMPT,
     PROBLEM_EXCERPT_K,
+    PROBLEM_GUIDE_CODE_PROBE_K,
+    PROBLEM_GUIDE_CODE_PROBES,
     PROBLEM_GUIDE_PROBE_K,
     PROBLEM_GUIDE_PROBES,
     Candidate,
     Ranking,
     RepoAssessment,
     SearchPlan,
+    VerifiedGuide,
     _clean_ranking,
     _format_candidates,
     _merge_candidates,
@@ -42,8 +45,9 @@ from app.finder.chains import (
     rank_candidates,
 )
 from app.finder.github import GitHubClient, RepoCandidate
-from app.llm import FAKE_CHAT_RESPONSES
+from app.llm import FAKE_CHAT_RESPONSES, get_structured_guide_model
 from app.main import app
+from app.rag import FILTERED_FETCH_MULTIPLIER, collect_excerpts
 from tests.conftest import RecordingChatModel
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
@@ -948,22 +952,79 @@ def test_the_guide_prompt_has_every_section_and_the_material(
     assert "acme/sample" in human.content
 
 
-def test_the_guide_searches_for_the_problem_and_for_setup_topics(
+class StubStore:
+    """A vector store that records searches and returns the given chunks, in order, for every search."""
+
+    def __init__(self, chunks: list[tuple[str, str]]) -> None:
+        self.chunks = chunks
+        self.searches: list[tuple[str, int]] = []
+
+    def similarity_search(self, query: str, k: int) -> list[Document]:
+        self.searches.append((query, k))
+        return [
+            Document(f"text of {path}", metadata={"path": path, "start_line": 1, "end_line": 2, "language": language})
+            for path, language in self.chunks[:k]
+        ]
+
+
+def test_the_guide_searches_for_code_then_the_problem_and_setup_topics(
     result_id: int, cloned_urls: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client.post(f"/api/finder/results/{result_id}/index")
-    searches: list[tuple[str, int]] = []
-
-    class StubStore:
-        def similarity_search(self, query: str, k: int) -> list[Document]:
-            searches.append((query, k))
-            return [Document("code", metadata={"path": "a.py", "start_line": 1, "end_line": 2})]
-
-    monkeypatch.setattr("app.rag.get_vectorstore", lambda repo: StubStore())
+    store = StubStore([("a.py", "Python")])
+    monkeypatch.setattr("app.rag.get_vectorstore", lambda repo: store)
 
     assert guide(result_id).status_code == 200
-    assert searches[0] == ("Extract tables from PDFs", PROBLEM_EXCERPT_K)
-    assert searches[1:] == [(probe, PROBLEM_GUIDE_PROBE_K) for probe in PROBLEM_GUIDE_PROBES]
+    assert store.searches == [
+        *((probe, PROBLEM_GUIDE_CODE_PROBE_K * FILTERED_FETCH_MULTIPLIER) for probe in PROBLEM_GUIDE_CODE_PROBES),
+        ("Extract tables from PDFs", PROBLEM_EXCERPT_K * FILTERED_FETCH_MULTIPLIER),
+        *((probe, PROBLEM_GUIDE_PROBE_K * FILTERED_FETCH_MULTIPLIER) for probe in PROBLEM_GUIDE_PROBES),
+    ]
+
+
+def test_the_guide_gets_code_first_and_never_built_docs(
+    result_id: int, cloned_urls: list[str], recording_model: RecordingChatModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+    store = StubStore(
+        [
+            ("docs/_build/html/code.html", "HTML"),
+            ("docs/index.html", "HTML"),
+            ("docs/usage.md", "Markdown"),
+            ("src/loader.py", "Python"),
+        ]
+    )
+    monkeypatch.setattr("app.rag.get_vectorstore", lambda repo: store)
+
+    guide(result_id)
+
+    excerpts = recording_model.prompts[0][0].content.split("Excerpts:")[-1]
+    assert "docs/_build" not in excerpts
+    assert "docs/index.html" not in excerpts
+    assert excerpts.index("src/loader.py") < excerpts.index("docs/usage.md")
+
+
+def test_a_filter_returns_up_to_k_of_the_chunks_that_pass_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = StubStore([("skip.html", "HTML"), ("a.py", "Python"), ("b.py", "Python"), ("c.py", "Python")])
+    monkeypatch.setattr("app.rag.get_vectorstore", lambda repo: store)
+
+    documents = collect_excerpts(1, [("query", 2)], keep=lambda item: item.metadata["language"] == "Python")
+
+    assert [item.metadata["path"] for item in documents] == ["a.py", "b.py"]
+    assert store.searches == [("query", 2 * FILTERED_FETCH_MULTIPLIER)]
+
+
+def test_the_prompt_bases_the_verdict_on_code(
+    result_id: int, cloned_urls: list[str], recording_model: RecordingChatModel
+) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+
+    guide(result_id)
+
+    system = recording_model.prompts[0][0].content
+    assert "Base this on the code, not on what the README promises" in system
+    assert "When unsure, say **Partly**" in system
+    assert "the code is right" in system
 
 
 def test_a_new_guide_replaces_the_old_one(
@@ -1016,3 +1077,194 @@ def test_deleting_the_repo_means_indexing_again(result_id: int, cloned_urls: lis
     assert client.delete(f"/api/repos/{repo_id}").status_code == 204
 
     assert guide(result_id).status_code == 409
+
+
+# --- verifying the guide against the code
+
+DRAFT = (
+    "## Recommended repo\n[acme/sample](https://github.com/acme/sample) greets people.\n\n"
+    "## Does it solve your problem?\n**{verdict}**. It reads PDFs, see `src/app.py`.\n\n"
+    "## Setup\n1. Install it.\n\n"
+    "## Step-by-step: solving YOUR problem with this repo\n1. Run `src/app.py`.\n\n"
+    "## What you still need to build yourself\nNothing.\n\n"
+    "## Gotchas and next steps\nNone."
+)
+FULLY_DRAFT = DRAFT.format(verdict="Fully")
+PARTLY_DRAFT = DRAFT.format(verdict="Partly")
+
+
+class FakeVerifier:
+    """Replaces the guide's structured model: replies as scripted and records what it was sent."""
+
+    def __init__(self) -> None:
+        self.reply: VerifiedGuide | Exception = VerifiedGuide(guide=FULLY_DRAFT, changes=[])
+        self.prompts: list[list[BaseMessage]] = []
+
+    def get_model(self, schema: type, fake_reply: Callable[[Any], Any] | None = None) -> Runnable:
+        assert schema is VerifiedGuide
+
+        def respond(prompt: PromptValue) -> VerifiedGuide:
+            self.prompts.append(prompt.to_messages())
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+
+        return RunnableLambda(respond)
+
+
+@pytest.fixture
+def verifier(
+    result_id: int,
+    cloned_urls: list[str],
+    recording_model: RecordingChatModel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> FakeVerifier:
+    """Index the result, script the draft and replace the verify call."""
+    client.post(f"/api/finder/results/{result_id}/index")
+    recording_model.responses = [FULLY_DRAFT]
+    recording_model.i = 0
+    fake = FakeVerifier()
+    monkeypatch.setattr("app.finder.chains.get_structured_guide_model", fake.get_model)
+    return fake
+
+
+def test_the_verifier_gets_the_problem_the_draft_and_the_cited_code(result_id: int, verifier: FakeVerifier) -> None:
+    guide(result_id)
+
+    system, human = verifier.prompts[0]
+    assert "### src/app.py" in system.content
+    assert "def greet" in system.content
+    assert "untrusted" in system.content
+    assert "**Fully** is only right if the code" in system.content
+    assert "Extract tables from PDFs" in human.content
+    assert FULLY_DRAFT in human.content
+
+
+def test_a_corrected_guide_is_saved_with_a_record_of_the_change(
+    result_id: int, verifier: FakeVerifier, db_session: Session
+) -> None:
+    corrected = PARTLY_DRAFT.replace("It reads PDFs", "It only reads images")
+    verifier.reply = VerifiedGuide(guide=corrected, changes=["The code only accepts images."])
+
+    body = guide(result_id).json()
+
+    assert body["verdict"] == "Partly"
+    assert body["verification"] == {
+        "status": "verified",
+        "changed": True,
+        "changes": ["The code only accepts images."],
+        "files_checked": ["src/app.py"],
+    }
+    assert body["guide"].startswith("## Your problem\n\n> Extract tables from PDFs\n\n## Recommended repo")
+    assert "It only reads images" in body["guide"]
+    assert "It reads PDFs" not in body["guide"]
+    assert db_session.get(SearchResult, result_id).problem_guide == body["guide"]
+
+
+def test_a_draft_that_was_right_is_recorded_as_unchanged(result_id: int, verifier: FakeVerifier) -> None:
+    body = guide(result_id).json()
+
+    assert body["verdict"] == "Fully"
+    assert body["verification"]["status"] == "verified"
+    assert body["verification"]["changed"] is False
+    assert body["verification"]["changes"] == []
+    assert "Not verified" not in body["guide"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ServerError(503, {"error": {"code": 503, "message": "test"}}),
+        OutputParserException("not JSON"),
+        VerifiedGuide(guide="   ", changes=[]),
+        VerifiedGuide(guide="## Recommended repo\nThe rest went missing.", changes=[]),
+    ],
+)
+def test_a_failed_verification_keeps_the_draft_labelled_and_lowers_fully(
+    result_id: int, verifier: FakeVerifier, reply: VerifiedGuide | Exception, db_session: Session
+) -> None:
+    verifier.reply = reply
+
+    response = guide(result_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["verdict"] == "Partly"
+    assert body["verification"]["status"] == "failed"
+    assert body["verification"]["changed"] is True
+    assert body["verification"]["files_checked"] == ["src/app.py"]
+    assert "Lowered the verdict" in body["verification"]["changes"][0]
+    assert "> **Not verified against the code.**" in body["guide"]
+    assert "**Fully**" not in body["guide"]
+    assert "It reads PDFs" in body["guide"]
+    assert db_session.get(SearchResult, result_id).problem_guide == body["guide"]
+
+
+def test_a_failed_verification_leaves_a_lower_verdict_alone(
+    result_id: int, verifier: FakeVerifier, recording_model: RecordingChatModel
+) -> None:
+    recording_model.responses = [DRAFT.format(verdict="No")]
+    recording_model.i = 0
+    verifier.reply = ServerError(503, {"error": {"code": 503, "message": "test"}})
+
+    body = guide(result_id).json()
+
+    assert body["verdict"] == "No"
+    assert body["verification"]["changed"] is False
+    assert body["verification"]["changes"] == []
+
+
+def test_no_source_files_skips_the_check_and_labels_the_guide(
+    result_id: int, verifier: FakeVerifier, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.finder.chains.load_guide_sources", lambda *_: [])
+
+    body = guide(result_id).json()
+
+    assert verifier.prompts == []
+    assert body["verification"]["status"] == "skipped"
+    assert body["verdict"] == "Partly"
+    assert "names no source files" in body["guide"]
+
+
+def test_a_draft_error_still_fails_the_request(result_id: int, verifier: FakeVerifier, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(_: str) -> Any:
+        raise ServerError(503, {"error": {"code": 503, "message": "test"}})
+
+    monkeypatch.setattr("app.finder.chains.get_guide_model", lambda: RunnableLambda(fail))
+
+    assert guide(result_id).status_code == 503
+    assert verifier.prompts == []
+
+
+def test_the_fake_provider_verifies_offline(result_id: int, cloned_urls: list[str]) -> None:
+    client.post(f"/api/finder/results/{result_id}/index")
+
+    body = guide(result_id).json()
+
+    assert body["verification"]["status"] == "verified"
+    assert body["verification"]["changed"] is False
+    assert body["verification"]["files_checked"] == ["src/app.py"]
+    assert body["verdict"] is None
+
+
+def test_the_verifier_uses_the_guide_chain_at_the_guide_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    levels: list[str] = []
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "placeholder-key")
+    monkeypatch.setenv("CHAT_MODELS", "gemini-3-chat")
+    monkeypatch.setenv("GUIDE_MODELS", "gemini-3-guide")
+    monkeypatch.setenv("CHAT_THINKING_LEVEL", "minimal")
+    monkeypatch.setenv("GUIDE_THINKING_LEVEL", "low")
+
+    def build(name: str, is_last: bool, thinking_level: str) -> StructuredFake:
+        levels.append(thinking_level)
+        return StructuredFake(responses=["unused"], label=name, calls=calls, failing={})
+
+    monkeypatch.setattr("app.llm._build_chat_model", build)
+
+    get_structured_guide_model(VerifiedGuide).invoke("Hi")
+
+    assert calls == ["gemini-3-guide"]
+    assert levels == ["low"]
