@@ -1,9 +1,12 @@
 """The only place chat and embedding models are created (gemini or fake)."""
 
+import logging
 from functools import lru_cache
 from typing import Any
 
 import httpx
+import onnxruntime as ort
+from fastembed import TextEmbedding
 from google.genai import Client
 from google.genai.errors import APIError
 from google.genai.types import HttpOptions, HttpRetryOptions
@@ -14,6 +17,11 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_google_genai._common import GoogleGenerativeAIError
 
 from app.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+CUDA_PROVIDER = "CUDAExecutionProvider"
+CPU_PROVIDER = "CPUExecutionProvider"
 
 FAKE_CHAT_RESPONSES = ["This is a fake answer from the offline test model [1]."]
 FAKE_EMBEDDING_SIZE = 256
@@ -129,20 +137,76 @@ def get_chat_model() -> BaseChatModel:
     )
 
 
+def embedding_identity() -> tuple[str, str]:
+    """Return the (provider, model) in use now. Vectors only match others from the same pair."""
+    settings = get_settings()
+    if settings.embedding_provider == "fake":
+        return "fake", f"deterministic-{FAKE_EMBEDDING_SIZE}"
+    if settings.embedding_provider == "local":
+        return "local", settings.embedding_model or DEFAULT_LOCAL_EMBEDDING_MODEL
+    return "gemini", settings.embedding_model
+
+
+class CudaUnavailableError(RuntimeError):
+    """CUDA can't be used for local embeddings. The message says why."""
+
+
+def _load_on_cuda(model_name: str, cache_dir: str) -> TextEmbedding:
+    """Load a model on the GPU, or raise CudaUnavailableError.
+
+    ONNX Runtime falls back to the CPU silently if CUDA fails to start, so this checks which
+    provider the loaded session really uses.
+    """
+    # On Windows, this finds the CUDA DLLs that requirements-gpu.txt installs through pip.
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+    if CUDA_PROVIDER not in ort.get_available_providers():
+        raise CudaUnavailableError("this install has no CUDA support (see requirements-gpu.txt)")
+    try:
+        text_embedding = TextEmbedding(model_name, cache_dir=cache_dir, providers=[CUDA_PROVIDER, CPU_PROVIDER])
+    except Exception as error:
+        raise CudaUnavailableError(f"the model couldn't start on CUDA: {error}") from error
+    if text_embedding.model.model.get_providers()[0] != CUDA_PROVIDER:
+        raise CudaUnavailableError("ONNX Runtime couldn't start CUDA, so check the NVIDIA driver")
+    return text_embedding
+
+
+def _load_text_embedding(model_name: str, cache_dir: str, device: str) -> TextEmbedding:
+    """Load a FastEmbed model on the requested device, and log which one it really uses."""
+    if device != "cpu":
+        try:
+            text_embedding = _load_on_cuda(model_name, cache_dir)
+            logger.info("Local embeddings: %s is running on CUDA.", model_name)
+            return text_embedding
+        except CudaUnavailableError as error:
+            if device == "cuda":
+                raise ValueError(f"EMBEDDING_DEVICE=cuda, but CUDA isn't usable: {error}.") from error
+            logger.warning("Local embeddings: CUDA isn't usable (%s), so falling back to the CPU.", error)
+    text_embedding = TextEmbedding(model_name, cache_dir=cache_dir, providers=[CPU_PROVIDER])
+    logger.info("Local embeddings: %s is running on the CPU.", model_name)
+    return text_embedding
+
+
 @lru_cache
-def _local_embeddings(model_name: str, cache_dir: str) -> FastEmbedEmbeddings:
+def _local_embeddings(model_name: str, cache_dir: str, device: str) -> FastEmbedEmbeddings:
     """Load a FastEmbed model once. Loading takes seconds, so every search can't repeat it.
 
-    FastEmbed runs the model on this machine's CPU with ONNX Runtime, so there's no API key, quota
-    or per-request cost. The first use downloads the model into cache_dir.
+    FastEmbed runs the model on this machine with ONNX Runtime, so there's no API key, quota or
+    per-request cost. The first use downloads the model into cache_dir.
     """
-    try:
-        return FastEmbedEmbeddings(model_name=model_name, cache_dir=cache_dir)
-    except ValueError as error:
+    supported_models = {model["model"].lower() for model in TextEmbedding.list_supported_models()}
+    if model_name.lower() not in supported_models:
         raise ValueError(
             f"EMBEDDING_MODEL {model_name!r} isn't a FastEmbed model. Change it in .env, or leave it empty "
             f"to use {DEFAULT_LOCAL_EMBEDDING_MODEL}."
-        ) from error
+        )
+    # model_construct hands over a model we've already loaded. The wrapper's own loader looks up
+    # the installed package by name, and crashes if only the other of fastembed/fastembed-gpu exists.
+    return FastEmbedEmbeddings.model_construct(
+        model_name=model_name,
+        cache_dir=cache_dir,
+        model=_load_text_embedding(model_name, cache_dir, device),
+    )
 
 
 def get_embeddings() -> Embeddings:
@@ -157,8 +221,7 @@ def get_embeddings() -> Embeddings:
         # The same text always gets the same vector, but the numbers don't capture meaning.
         return DeterministicFakeEmbedding(size=FAKE_EMBEDDING_SIZE)
     if settings.embedding_provider == "local":
-        model_name = settings.embedding_model or DEFAULT_LOCAL_EMBEDDING_MODEL
-        return _local_embeddings(model_name, str(settings.fastembed_dir))
+        return _local_embeddings(embedding_identity()[1], str(settings.fastembed_dir), settings.embedding_device)
     api_key = _gemini_api_key(settings)
     embeddings = GoogleGenerativeAIEmbeddings(
         model=_require_gemini_setting(settings.embedding_model, "EMBEDDING_MODEL"),

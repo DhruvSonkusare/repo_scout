@@ -12,9 +12,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import get_settings
 from app.db import engine
 from app.ingest import fail_interrupted_repos
-from app.routers import repos
+from app.routers import chat, repos
 
 logger = logging.getLogger(__name__)
+
+# Uvicorn only configures its own loggers, so without this our INFO lines wouldn't appear.
+logging.basicConfig(format="%(levelname)s:     %(name)s: %(message)s")
+logging.getLogger("app").setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -30,6 +34,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="RepoGuide", lifespan=lifespan)
 app.include_router(repos.router)
+app.include_router(chat.router)
 
 
 @app.get("/api/health")

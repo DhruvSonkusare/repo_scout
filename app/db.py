@@ -53,6 +53,9 @@ class Repo(Base):
     file_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     chunks_embedded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # What built this repo's vectors. Searching needs the same model. NULL means unknown.
+    embedding_provider: Mapped[str | None] = mapped_column(Text)
+    embedding_model: Mapped[str | None] = mapped_column(Text)
     languages: Mapped[dict[str, int]] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
     onboarding_guide: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

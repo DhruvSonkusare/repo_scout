@@ -1,6 +1,5 @@
 """API and background indexing tests, on real Postgres and real Chroma in a temporary folder."""
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -12,32 +11,15 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import Repo
-from app.ingest import CloneError, remove_clone
+from app.ingest import CloneError
 from app.main import app
 from app.vectorstore import _get_client, delete_collection, get_vectorstore
 from tests.conftest import FakeGemini
 
-pytestmark = pytest.mark.usefixtures("fresh_settings")
+pytestmark = pytest.mark.usefixtures("fresh_settings", "cloned_urls")
 
-SAMPLE_REPO = Path(__file__).parent / "fixtures" / "sample_repo"
 CLICK_URL = "https://github.com/pallets/click"
 client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def cloned_urls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Replace git clone with a copy of the sample repo, and record the URLs it was asked for."""
-    urls: list[str] = []
-
-    def copy_sample(url: str, repo_id: int) -> Path:
-        urls.append(url)
-        remove_clone(repo_id)
-        destination = get_settings().repos_dir / str(repo_id)
-        shutil.copytree(SAMPLE_REPO, destination)
-        return destination
-
-    monkeypatch.setattr("app.ingest.clone_repo", copy_sample)
-    return urls
 
 
 def add_repo(url: str = CLICK_URL) -> dict:
@@ -73,6 +55,8 @@ def test_add_repo_indexes_it_in_the_background() -> None:
     assert repo["chunk_count"] > 0
     assert repo["chunks_embedded"] == repo["chunk_count"]
     assert collection_count(repo["id"]) == repo["chunk_count"]
+    assert repo["embedding_provider"] == "fake"
+    assert repo["embedding_model"] == "deterministic-256"
 
 
 @pytest.mark.parametrize(

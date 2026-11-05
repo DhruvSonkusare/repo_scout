@@ -21,7 +21,13 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import IN_PROGRESS_STATUSES, Repo, SessionLocal
-from app.llm import GEMINI_ERRORS, describe_gemini_error, gemini_retry_delay, is_daily_quota_error
+from app.llm import (
+    GEMINI_ERRORS,
+    describe_gemini_error,
+    embedding_identity,
+    gemini_retry_delay,
+    is_daily_quota_error,
+)
 from app.vectorstore import delete_collection, get_vectorstore
 
 logger = logging.getLogger(__name__)
@@ -352,6 +358,7 @@ def _run_indexing(db: Session, repo: Repo) -> None:
     repo.error = None
     repo.file_count = repo.chunk_count = repo.chunks_embedded = 0
     repo.languages = {}
+    repo.embedding_provider = repo.embedding_model = None
     db.commit()
 
     root = clone_repo(repo.url, repo.id)
@@ -371,6 +378,7 @@ def _run_indexing(db: Session, repo: Repo) -> None:
     repo.file_count = sum(languages.values())
     repo.chunk_count = len(chunks)
     repo.languages = dict(languages)
+    repo.embedding_provider, repo.embedding_model = embedding_identity()
     db.commit()
 
     delete_collection(repo.id)

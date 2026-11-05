@@ -1,18 +1,3 @@
-fastapi
-uvicorn[standard]
-sqlalchemy>=2
-psycopg[binary]>=3
-alembic
-pydantic-settings
-httpx
-langchain-core
-langchain-text-splitters
-langchain-google-genai
-google-genai
-langchain-chroma
-langchain-community
+# Default install: local embeddings run on the CPU. Works everywhere, including Docker.
+-r requirements-base.txt
 fastembed
-chromadb
-python-dotenv
-pytest
-pytest-cov

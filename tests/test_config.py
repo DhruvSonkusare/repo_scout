@@ -19,6 +19,12 @@ def test_get_settings_creates_data_directories(monkeypatch: pytest.MonkeyPatch, 
     assert settings.chroma_dir.is_dir()
 
 
+def test_pytest_cannot_collect_cloned_repos(pytestconfig: pytest.Config) -> None:
+    # Collecting data/repos would run the conftest.py and tests of whatever repo was cloned there.
+    assert pytestconfig.getini("testpaths") == ["tests"]
+    assert "data" in pytestconfig.getini("norecursedirs")
+
+
 def test_get_settings_is_cached() -> None:
     assert get_settings() is get_settings()
 

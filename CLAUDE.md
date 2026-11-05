@@ -26,12 +26,18 @@ tests and a good README matter as much as features.
   default (`EMBEDDING_PROVIDER`: `local` | `gemini` | `fake`; `EMBEDDING_MODEL` picks the model). The default
   model is `jinaai/jina-embeddings-v2-base-code`. Gemini embeddings stay available, but the free tier's
   1,000 texts a day is too low to index most repos.
+- Local embeddings use `EMBEDDING_DEVICE` (`auto` | `cuda` | `cpu`). `requirements.txt` is the CPU build, for
+  Docker and machines without a GPU. `requirements-gpu.txt` adds CUDA through `fastembed-gpu`. The two builds
+  conflict, so a venv has one or the other. Installing the GPU build takes the three commands at the top of
+  that file, because `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU
+  with a log line.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
   (no build step). Use `marked` + `highlight.js` from a CDN for Markdown/code.
 - Tests: **pytest** + FastAPI `TestClient`, with fake LLM/embeddings (no API key needed).
   Tests run against the real `repoguide_test` Postgres database, never SQLite, because we use JSONB.
+  `pytest.ini` limits collection to `tests/`, because collecting `data/repos/` would run cloned repos' code.
 
 ## Folder layout
 The project root is this folder (`d:\github_repo_guide`), not a nested `repoguide/`.
@@ -66,7 +72,8 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
   `LLM_PROVIDER=fake` with `EMBEDDING_PROVIDER=fake` must make the whole app work offline (used by tests).
 - Pauses and rate-limit waits during indexing apply to Gemini embeddings only.
 - A collection only works with the embedding model that built it, so changing the provider or model
-  means re-indexing.
+  means re-indexing. Each repo records its `embedding_provider` and `embedding_model`, and asking a question
+  returns a 409 "Re-index needed" if they don't match the current settings. Changing the device doesn't count.
 - All prompts are `ChatPromptTemplate` constants at the top of the module.
 - Chains use LCEL (`prompt | model | parser`). Use `model.with_structured_output(PydanticModel)`
   whenever we need JSON from the LLM — never parse JSON by hand.

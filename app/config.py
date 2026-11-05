@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     embedding_provider: Literal["gemini", "local", "fake"] = "local"
     # Empty means the default local model. Gemini requires a value.
     embedding_model: str = ""
+    # Local embeddings only. auto uses CUDA if it works and otherwise logs a line and uses the CPU.
+    embedding_device: Literal["auto", "cuda", "cpu"] = "auto"
     # Retries after the first attempt, for temporary errors such as 429 and 503.
     max_retries: int = Field(default=3, ge=0)
 

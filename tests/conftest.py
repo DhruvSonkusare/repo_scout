@@ -41,6 +41,9 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
+from app.ingest import remove_clone  # noqa: E402
+
+SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -84,6 +87,22 @@ def db_session() -> Iterator[Session]:
     """A session on the test database."""
     with SessionLocal() as session:
         yield session
+
+
+@pytest.fixture
+def cloned_urls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace git clone with a copy of the sample repo, and record the URLs it was asked for."""
+    urls: list[str] = []
+
+    def copy_sample(url: str, repo_id: int) -> Path:
+        urls.append(url)
+        remove_clone(repo_id)
+        destination = get_settings().repos_dir / str(repo_id)
+        shutil.copytree(SAMPLE_REPO, destination)
+        return destination
+
+    monkeypatch.setattr("app.ingest.clone_repo", copy_sample)
+    return urls
 
 
 @pytest.fixture

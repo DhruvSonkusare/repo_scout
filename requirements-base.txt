@@ -1,0 +1,18 @@
+# Shared by requirements.txt (CPU) and requirements-gpu.txt (NVIDIA GPU). Install one of those, not this.
+fastapi
+uvicorn[standard]
+sqlalchemy>=2
+psycopg[binary]>=3
+alembic
+pydantic-settings
+httpx
+langchain-core
+langchain-text-splitters
+langchain-google-genai
+google-genai
+langchain-chroma
+langchain-community
+chromadb
+python-dotenv
+pytest
+pytest-cov

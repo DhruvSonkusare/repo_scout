@@ -19,7 +19,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 
 | Table | Columns |
 |---|---|
-| `repos` | id, url (unique), name (`owner/repo`), status (`pending/cloning/indexing/ready/failed`), error, file_count, chunk_count, chunks_embedded (progress), languages (JSONB), onboarding_guide (text), created_at |
+| `repos` | id, url (unique), name (`owner/repo`), status (`pending/cloning/indexing/ready/failed`), error, file_count, chunk_count, chunks_embedded (progress), embedding_provider, embedding_model, languages (JSONB), onboarding_guide (text), created_at |
 | `conversations` | id, repo_id → repos, title, created_at |
 | `messages` | id, conversation_id → conversations, role (`user/ai`), content, sources (JSONB list), created_at |
 | `searches` | id, problem (text), plan (JSONB: queries/language/keywords), created_at |
@@ -116,7 +116,8 @@ migration is and why production apps never use `create_all()`, and JSONB vs JSON
 > Implement `app/llm.py` with `get_chat_model()` and `get_embeddings()`. Provider "gemini" uses
 > `ChatGoogleGenerativeAI` (temperature 0.2). `EMBEDDING_PROVIDER` chooses embeddings separately: "local"
 > (the default) uses `FastEmbedEmbeddings` with `jinaai/jina-embeddings-v2-base-code` unless `EMBEDDING_MODEL`
-> names another model, and "gemini" uses `GoogleGenerativeAIEmbeddings`. Provider
+> names another model, on the device set by `EMBEDDING_DEVICE` (auto, cuda or cpu; `requirements-gpu.txt`
+> installs the CUDA build), and "gemini" uses `GoogleGenerativeAIEmbeddings`. Provider
 > "fake" uses `FakeListChatModel` and `DeterministicFakeEmbedding(size=256)`. Add a tiny script
 > `scripts/smoke_llm.py` that sends "Say hello in 5 words" and embeds one sentence, printing the
 > vector length. Set `LLM_PROVIDER=fake` and `EMBEDDING_PROVIDER=fake` in `tests/conftest.py` so all tests
@@ -178,7 +179,8 @@ returns 404.
 > Implement `app/rag.py` and `app/routers/chat.py`:
 > - CONDENSE_PROMPT: rewrite a follow-up into a standalone question using chat history
 >   (skip the LLM call when there is no history)
-> - retriever: `as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 24})`
+> - retriever: `as_retriever(search_type="mmr", search_kwargs={"k": 6, "fetch_k": 24, "lambda_mult": 0.85})`
+>   (the default 0.5 favours variety so much that it dropped the most relevant files)
 > - ANSWER_PROMPT: senior engineer persona, answer ONLY from numbered excerpts, cite like [1],
 >   say honestly when the answer is not in the excerpts
 > - `format_docs()` numbering excerpts as `[n] path (lines a-b)` + fenced code
@@ -189,12 +191,14 @@ returns 404.
 >   Save the AI message + sources JSON when streaming finishes (open a new DB session).
 >   Use the last 6 turns as history.
 > - GET conversations list and messages endpoints.
-> Return 409 if the repo isn't ready.
+> Return 409 if the repo isn't ready, or "Re-index needed" if it was indexed with a different
+> embedding provider or model than the current settings.
 
 **Done when:** this streams tokens, and a follow-up "where is that tested?" with the same
 conversation_id works.
-- Windows PowerShell (`curl` alone is an alias for `Invoke-WebRequest`, and inner quotes need `\"`):
-  `curl.exe -N -X POST http://localhost:8000/api/repos/1/ask -H "Content-Type: application/json" -d '{\"question\":\"How are command options parsed?\"}'`
+- Windows PowerShell (`curl` alone is an alias for `Invoke-WebRequest`, and PowerShell 5.1 splits `-d` JSON
+  at its spaces, so pipe the body in):
+  `'{"question":"How are command options parsed?"}' | curl.exe -N -X POST http://localhost:8000/api/repos/1/ask -H "Content-Type: application/json" --data-binary "@-"`
 - Linux/macOS:
   `curl -N -X POST http://localhost:8000/api/repos/1/ask -H "Content-Type: application/json" -d '{"question":"How are command options parsed?"}'`
 **Learn:** LCEL pipes, `MessagesPlaceholder`, history condensing, MMR, `astream`.
@@ -341,7 +345,8 @@ original problem, gives numbered how-to steps for that exact problem and cites r
 
 ### Step 13: Docker + README
 **Prompt**
-> Add a `Dockerfile` (python:3.12-slim, install git, non-root user, uvicorn on 8000) and add an
+> Add a `Dockerfile` (python:3.12-slim, install git, install `requirements.txt` so embeddings run on the
+> CPU, non-root user, uvicorn on 8000) and add an
 > `app` service to `docker-compose.yml` that depends on `db` being healthy, uses
 > `DATABASE_URL=postgresql+psycopg://repoguide:repoguide@db:5432/repoguide` (host is `db`
 > inside Docker, not localhost), runs `alembic upgrade head` before starting uvicorn, and has a
