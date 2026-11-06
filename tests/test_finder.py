@@ -1136,6 +1136,11 @@ def test_the_verifier_gets_the_problem_the_draft_and_the_cited_code(result_id: i
     assert "def greet" in system.content
     assert "untrusted" in system.content
     assert "**Fully** is only right if the code" in system.content
+    assert "src/\n  app.py" in system.content  # file tree
+    assert "A tiny project used by the RepoGuide tests." in system.content  # README
+    assert "never remove one just because the code doesn't confirm it" in system.content
+    assert "Only remove what the code contradicts" in system.content
+    assert "A file listed in the file tree exists" in system.content
     assert "Extract tables from PDFs" in human.content
     assert FULLY_DRAFT in human.content
 
@@ -1151,6 +1156,7 @@ def test_a_corrected_guide_is_saved_with_a_record_of_the_change(
     assert body["verdict"] == "Partly"
     assert body["verification"] == {
         "status": "verified",
+        "draft": FULLY_DRAFT,
         "changed": True,
         "changes": ["The code only accepts images."],
         "files_checked": ["src/app.py"],
@@ -1159,6 +1165,34 @@ def test_a_corrected_guide_is_saved_with_a_record_of_the_change(
     assert "It only reads images" in body["guide"]
     assert "It reads PDFs" not in body["guide"]
     assert db_session.get(SearchResult, result_id).problem_guide == body["guide"]
+
+
+def test_the_draft_and_verification_are_saved_next_to_the_guide(
+    result_id: int, verifier: FakeVerifier, db_session: Session
+) -> None:
+    verifier.reply = VerifiedGuide(guide=PARTLY_DRAFT, changes=["The code only accepts images."])
+
+    body = guide(result_id).json()
+
+    saved = db_session.get(SearchResult, result_id).guide_verification
+    assert saved == body["verification"]
+    assert saved["draft"] == FULLY_DRAFT
+    stored = client.get("/api/finder/searches/1").json()["results"][0]
+    assert stored["guide_verification"] == body["verification"]
+
+
+def test_a_failed_verification_also_saves_the_draft(result_id: int, verifier: FakeVerifier, db_session: Session) -> None:
+    verifier.reply = ServerError(503, {"error": {"code": 503, "message": "test"}})
+
+    guide(result_id)
+
+    saved = db_session.get(SearchResult, result_id).guide_verification
+    assert saved["status"] == "failed"
+    assert saved["draft"] == FULLY_DRAFT
+
+
+def test_a_result_without_a_guide_has_no_verification(result_id: int) -> None:
+    assert client.get("/api/finder/searches/1").json()["results"][0]["guide_verification"] is None
 
 
 def test_a_draft_that_was_right_is_recorded_as_unchanged(result_id: int, verifier: FakeVerifier) -> None:

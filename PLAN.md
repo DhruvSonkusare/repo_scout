@@ -23,7 +23,7 @@ Database: **PostgreSQL** (JSON columns are `JSONB`, all timestamps are timezone-
 | `conversations` | id, repo_id → repos, title, created_at |
 | `messages` | id, conversation_id → conversations, role (`user/ai`), content, sources (JSONB list), created_at |
 | `searches` | id, problem (text), plan (JSONB: queries/language/must_have), created_at |
-| `search_results` | id, search_id → searches, full_name, url, description, stars, language, last_pushed, score (0–100, NULL if not assessed), why_it_fits, caveats, how_to_start (JSONB list of strings), repo_id → repos (nullable, set when indexed), problem_guide (text, nullable) |
+| `search_results` | id, search_id → searches, full_name, url, description, stars, language, last_pushed, score (0–100, NULL if not assessed), why_it_fits, caveats, how_to_start (JSONB list of strings), guide_verification (JSONB, with the draft guide), repo_id → repos (nullable, set when indexed), problem_guide (text, nullable) |
 
 ## Reference: API
 
@@ -297,8 +297,9 @@ chains concurrently, and why we rerank instead of trusting GitHub stars.
 > Partly when unsure. Skip built docs (`docs/_build`, HTML in `docs/`) and add searches aimed at entry
 > points and input handling. Then verify: load the source files the guide cites and the modules they
 > import (truncated), and make one more LLM call that checks each claim against that code, fixes
-> contradictions and downgrades the verdict if needed. A guide that couldn't be verified is labelled so.
-> Save to `search_results.problem_guide`. The API response must also return `problem`
+> contradictions and downgrades the verdict if needed. It also gets the file tree and README, and never
+> removes setup steps just because code doesn't confirm them. A guide that couldn't be verified is
+> labelled so. Save to `search_results.problem_guide`, with the draft in `guide_verification`. The API response must also return `problem`
 > (the original text), the repo name, the verdict and whether verification changed anything.
 > `scripts/eval_guides.py` checks guides against expected facts.
 

@@ -140,6 +140,8 @@ class SearchResult(Base):
     # SET NULL keeps the search result when its indexed repo is deleted.
     repo_id: Mapped[int | None] = mapped_column(ForeignKey("repos.id", ondelete="SET NULL"), index=True)
     problem_guide: Mapped[str | None] = mapped_column(Text)
+    # How the guide was checked against the code, with its draft, so the two can be compared.
+    guide_verification: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     search: Mapped[Search] = relationship(back_populates="results")
     repo: Mapped[Repo | None] = relationship()

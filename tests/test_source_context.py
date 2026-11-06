@@ -21,7 +21,8 @@ def write(root: Path, files: dict[str, str]) -> None:
     for name, text in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # Empty files are skipped when loading, so a file with no text in a test still gets some.
+        path.write_text(text or "x = 1", encoding="utf-8")
 
 
 def paths_for(root: Path, guide: str, excerpts: list[str] | None = None) -> list[str]:
@@ -85,7 +86,94 @@ def test_imports_are_followed_through_packages_and_relative_imports(tmp_path: Pa
         "pkg/tools/loader.py",
         "pkg/base.py",
         "pkg/tools/helper.py",
+        "pkg/__init__.py",
     }
+
+
+def test_importing_a_module_also_follows_its_parent_packages(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        {
+            "run.py": "from pkg.tables.task import Task",
+            "pkg/__init__.py": "",
+            "pkg/tables/__init__.py": "from pkg.tables.model import Model",
+            "pkg/tables/task.py": "class Task: ...",
+            "pkg/tables/model.py": "class Model: ...",
+        },
+    )
+
+    assert set(paths_for(tmp_path, "Run `run.py`.")) == {
+        "run.py",
+        "pkg/__init__.py",
+        "pkg/tables/__init__.py",
+        "pkg/tables/task.py",
+        "pkg/tables/model.py",
+    }
+
+
+def test_a_related_file_deep_in_the_imports_beats_unrelated_nearer_ones(tmp_path: Path) -> None:
+    others = {f"pkg/other_{number}.py": "" for number in range(MAX_VERIFY_FILES)}
+    imports = "\n".join(f"from pkg import other_{number}" for number in range(MAX_VERIFY_FILES))
+    write(
+        tmp_path,
+        {
+            "run_tables.py": f"{imports}\nfrom pkg import tables",
+            "pkg/tables.py": "from pkg.deep import tables_model",
+            "pkg/deep/tables_model.py": "",
+            **others,
+        },
+    )
+
+    assert "pkg/deep/tables_model.py" in paths_for(tmp_path, "Run `run_tables.py`.")
+
+
+def test_empty_files_are_followed_but_do_not_use_up_the_limit(tmp_path: Path) -> None:
+    write(tmp_path, {"run.py": "import pkg.mod", "pkg/mod.py": ""})
+    (tmp_path / "pkg" / "__init__.py").write_text("\n", encoding="utf-8")
+
+    assert paths_for(tmp_path, "Run `run.py`.") == ["run.py", "pkg/mod.py"]
+
+
+def test_what_a_related_file_imports_beats_files_with_unrelated_names(tmp_path: Path) -> None:
+    others = {f"pkg/other_{number}.py": "" for number in range(MAX_VERIFY_FILES)}
+    imports = "\n".join(f"from pkg import other_{number}" for number in range(MAX_VERIFY_FILES))
+    write(
+        tmp_path,
+        {
+            "scripts/tables.py": f"{imports}\nfrom pkg import tables",
+            "pkg/tables.py": "from pkg.base import Base",
+            "pkg/base.py": "class Base: ...",
+            **others,
+        },
+    )
+
+    paths = paths_for(tmp_path, "Run `scripts/tables.py`.")
+
+    assert paths[:3] == ["scripts/tables.py", "pkg/tables.py", "pkg/base.py"]
+
+
+def test_a_cited_config_brings_in_the_script_named_like_it(tmp_path: Path) -> None:
+    write(tmp_path, {"configs/tables.yaml": "a: 1", "scripts/tables.py": "import pkg.mod", "pkg/mod.py": "", "scripts/ocr.py": ""})
+
+    assert paths_for(tmp_path, "Edit `configs/tables.yaml`.") == ["configs/tables.yaml", "scripts/tables.py", "pkg/mod.py"]
+
+
+def test_a_config_found_by_a_path_it_defines_does_not_change_what_counts_as_related(tmp_path: Path) -> None:
+    others = {f"pkg/ocr_{number}.py": "" for number in range(MAX_VERIFY_FILES)}
+    imports = "\n".join(f"from pkg import ocr_{number}" for number in range(MAX_VERIFY_FILES))
+    write(
+        tmp_path,
+        {
+            "scripts/tables.py": f"{imports}\nfrom pkg import tables",
+            "pkg/tables.py": "",
+            "configs/ocr.yaml": "model: models/det/v4",
+            **others,
+        },
+    )
+
+    paths = paths_for(tmp_path, "Run `scripts/tables.py`, which uses `models/det/v4`.")
+
+    assert paths[:3] == ["scripts/tables.py", "configs/ocr.yaml", "pkg/tables.py"]
 
 
 def test_a_src_layout_is_followed(tmp_path: Path) -> None:

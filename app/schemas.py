@@ -53,6 +53,22 @@ class SearchRequest(BaseModel):
     problem: str = Field(min_length=3, max_length=2000)
 
 
+class GuideVerificationOut(BaseModel):
+    """What checking a guide against the repo's source code found.
+
+    status is verified, failed (the check couldn't finish) or skipped (no source files to check).
+    draft is the guide before the check, so the final guide can be compared with it.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: str
+    draft: str
+    changed: bool
+    changes: list[str]
+    files_checked: list[str]
+
+
 class SearchResultOut(BaseModel):
     """One repo found for a problem, and how well it fits."""
 
@@ -71,6 +87,7 @@ class SearchResultOut(BaseModel):
     how_to_start: list[str]
     repo_id: int | None
     problem_guide: str | None
+    guide_verification: GuideVerificationOut | None
 
 
 class SearchSummaryOut(BaseModel):
@@ -88,20 +105,6 @@ class SearchOut(SearchSummaryOut):
 
     plan: dict[str, Any]
     results: list[SearchResultOut]
-
-
-class GuideVerificationOut(BaseModel):
-    """What checking a guide against the repo's source code found.
-
-    status is verified, failed (the check couldn't finish) or skipped (no source files to check).
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    status: str
-    changed: bool
-    changes: list[str]
-    files_checked: list[str]
 
 
 class ProblemGuideOut(BaseModel):

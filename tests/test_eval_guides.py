@@ -10,6 +10,8 @@ CASE = CASES[0]
 FACT_NAMES = [fact.name for fact in CASE.facts]
 # A full guide from before verification existed, kept as a permanent bad example.
 BEFORE_FIX_GUIDE = Path(__file__).parent / "fixtures" / "guides" / "pdf-extract-kit-before.md"
+# The first verified guide: it fixed the main error, but lost the download and doubted a real file.
+VERIFIED_V1_GUIDE = BEFORE_FIX_GUIDE.with_name("pdf-extract-kit-verified-v1.md")
 
 # The parts of the real guide that were wrong, word for word. The code rejects PDFs in this step.
 MISLEADING_GUIDE = """## Does it solve your problem?
@@ -26,8 +28,12 @@ MISLEADING_GUIDE = """## Does it solve your problem?
 CORRECT_GUIDE = """## Does it solve your problem?
 **Partly**. The table parsing task only accepts .png, .jpg and .jpeg images, so PDFs are rejected.
 
+## Setup
+1. Install with `pip install -r requirements-cpu.txt` on a CPU.
+2. Download the model weights from Hugging Face.
+
 ## Step-by-step: solving YOUR problem with this repo
-1. Convert each PDF page to an image first, then point `configs/table_parsing.yaml` at that folder.
+1. Save each PDF page as a PNG image file first, then point `configs/table_parsing.yaml` at that folder.
 
 ## Gotchas and next steps
 * PaddleOCR model paths such as `models/OCR/PaddleOCR/det/ch_PP-OCRv4_det` are set in `configs/ocr.yaml`.
@@ -41,19 +47,27 @@ def results(guide: str) -> dict[str, bool]:
 def test_the_case_covers_the_facts_we_checked_by_hand() -> None:
     assert CASE.repo == "opendatalab/pdf-extract-kit"
     assert CASE.problem == "extract tables from scanned PDFs in Python"
-    assert len(FACT_NAMES) == 4
+    assert len(FACT_NAMES) == 7
 
 
-def test_the_misleading_guide_fails_every_fact() -> None:
-    assert list(results(MISLEADING_GUIDE).values()) == [False, False, False, False]
+def test_the_misleading_excerpts_fail_every_fact_they_cover() -> None:
+    assert list(results(MISLEADING_GUIDE).values()) == [False, False, False, False, False, False, True]
 
 
-def test_the_real_guide_that_misled_us_fails_every_fact() -> None:
-    assert list(results(BEFORE_FIX_GUIDE.read_text(encoding="utf-8")).values()) == [False, False, False, False]
+def test_the_real_guide_that_misled_us_only_passes_the_setup_facts() -> None:
+    passed = list(results(BEFORE_FIX_GUIDE.read_text(encoding="utf-8")).values())
+
+    assert passed == [False, False, False, False, False, True, True]
+
+
+def test_the_first_verified_guide_fails_the_gaps_found_by_reading_it() -> None:
+    passed = list(results(VERIFIED_V1_GUIDE.read_text(encoding="utf-8")).values())
+
+    assert passed == [True, True, True, True, False, False, False]
 
 
 def test_a_correct_guide_passes_every_fact() -> None:
-    assert list(results(CORRECT_GUIDE).values()) == [True, True, True, True]
+    assert list(results(CORRECT_GUIDE).values()) == [True] * 7
 
 
 def test_a_clear_statement_about_images_passes_without_partly() -> None:
@@ -78,6 +92,52 @@ def test_saying_paddleocr_is_not_in_that_config_is_fine() -> None:
 
 def test_paddleocr_paths_without_their_config_fail() -> None:
     assert results("Download to `models/OCR/PaddleOCR/det`.")[FACT_NAMES[3]] is False
+
+
+def test_discussing_paddleocr_without_its_config_fails() -> None:
+    assert results("It can use PaddleOCR+TableMaster for tables.")[FACT_NAMES[3]] is False
+
+
+def test_never_mentioning_paddleocr_is_fine() -> None:
+    assert results("It uses another model.")[FACT_NAMES[3]] is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Save each page as a PNG file.", True),
+        ("Call `image.save(path)` on each page.", True),
+        ("Write the pages to a folder.", True),
+        ("Convert each page to an image in memory.", False),
+    ],
+)
+def test_saving_pages_as_files_is_recognized(text: str, expected: bool) -> None:
+    assert results(text)[FACT_NAMES[4]] is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Download the model weights from Hugging Face.", True),
+        ("The checkpoints have to be downloaded first.", True),
+        ("Download the repo as a zip.", False),
+        ("Install the requirements.", False),
+    ],
+)
+def test_the_model_download_is_recognized(text: str, expected: bool) -> None:
+    assert results(text)[FACT_NAMES[5]] is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Use `requirements-cpu.txt` on a CPU.", True),
+        ("The existence of `requirements-cpu.txt` is not confirmed by the source code.", False),
+        ("`requirements-cpu.txt` may not exist.", False),
+    ],
+)
+def test_doubt_about_the_cpu_requirements_fails(text: str, expected: bool) -> None:
+    assert results(text)[FACT_NAMES[6]] is expected
 
 
 @pytest.mark.parametrize(

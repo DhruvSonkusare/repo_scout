@@ -1,6 +1,8 @@
 """Find and load the source files a guide relies on, so its claims can be checked against real code."""
 
 import ast
+import heapq
+import itertools
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,7 +114,9 @@ def _imported_files(path: str, text: str, files: dict[str, SourceFile]) -> list[
             modules += [base] if base else []
             # `from package import module` names a module, while `from module import name` doesn't.
             modules += [f"{base}.{alias.name}" if base else alias.name for alias in node.names]
-    found = (_module_file(module, files) for module in modules)
+    # Importing a.b.c also runs a/__init__.py and a/b/__init__.py, and those often import more.
+    parents = (".".join(module.split(".")[:end]) for module in modules for end in range(1, module.count(".") + 2))
+    found = (_module_file(module, files) for module in parents)
     return list(dict.fromkeys(file for file in found if file is not None and file != path))
 
 
@@ -121,41 +125,65 @@ def _words(path: str) -> set[str]:
     return set(WORD_PATTERN.findall(path.lower())) - COMMON_PATH_WORDS
 
 
-def _follow_imports(seeds: list[str], files: dict[str, SourceFile]) -> list[str]:
-    """Walk from the seed files through their imports, nearest first, up to the file limit.
+def _scripts_for_configs(cited: list[str], files: dict[str, SourceFile]) -> list[str]:
+    """Return the Python files named like a cited config, as configs/tables.yaml usually belongs to scripts/tables.py."""
+    stems = {Path(path).stem for path in cited if files[path].language in CONFIG_LANGUAGES}
+    return [path for path in files if path.endswith(".py") and Path(path).stem in stems]
 
-    Package __init__ files often import every sibling, so files whose paths share words with the
-    seeds go first: for scripts/table_parsing.py, that puts the table parsing task ahead of the others.
+
+def _follow_imports(seeds: list[str], related_to: list[str], files: dict[str, SourceFile]) -> list[str]:
+    """Walk from the seed files through their imports, up to the file limit, closest related first.
+
+    Package __init__ files often import every sibling, so a walk by distance alone would fill the
+    limit with unrelated files. So a file ranks by the words its path shares with related_to, and a
+    file imported by a related file ranks with it. For configs/table_parsing.yaml, that reaches the
+    table parsing model and its base class before the other tasks. Empty files don't use up the limit.
     """
-    seed_words = set().union(*(_words(path) for path in seeds)) if seeds else set()
+    words_to_match = set().union(*(_words(path) for path in related_to)) if related_to else set()
+
+    def shared_words(path: str) -> int:
+        return len(_words(path) & words_to_match)
+
+    order = itertools.count()
+    # Each entry sorts by: seeds first, inherited rank, the file's own rank, import depth, order found.
+    queue = [(0, 0, 0, 0, next(order), path) for path in seeds]
+    heapq.heapify(queue)
+    best_rank = {path: 0 for path in seeds}
+    visited: set[str] = set()
     chosen: list[str] = []
-    seen = set(seeds)
-    level = seeds
-    for _ in range(MAX_IMPORT_DEPTH + 1):
-        next_level: list[str] = []
-        for path in level:
-            if len(chosen) == MAX_VERIFY_FILES:
-                return chosen
+    while queue and len(chosen) < MAX_VERIFY_FILES:
+        _, _, _, depth, _, path = heapq.heappop(queue)
+        if path in visited:
+            continue
+        visited.add(path)
+        text = _read(files[path])
+        if text.strip():
             chosen.append(path)
-            for imported in _imported_files(path, _read(files[path]), files):
-                if imported not in seen:
-                    seen.add(imported)
-                    next_level.append(imported)
-        level = sorted(next_level, key=lambda path: len(_words(path) & seed_words), reverse=True)
+        if depth == MAX_IMPORT_DEPTH:
+            continue
+        # A seed passes on no rank, because a cited script imports plenty that has nothing to do with it.
+        own_rank = 0 if path in seeds else shared_words(path)
+        for imported in _imported_files(path, text, files):
+            rank = max(shared_words(imported), own_rank)
+            if imported not in visited and rank > best_rank.get(imported, -1):
+                # A better route to a queued file adds a new entry, and the old one is skipped later.
+                best_rank[imported] = rank
+                heapq.heappush(queue, (1, -rank, -shared_words(imported), depth + 1, next(order), imported))
     return chosen
 
 
 def load_guide_sources(root: Path, guide: str, excerpt_paths: list[str]) -> list[LoadedFile]:
-    """Load the files a guide's claims rest on: what it cites, then what those import.
+    """Load the files a guide's claims rest on: what it cites, the scripts its configs belong to, then what those import.
 
     A guide that cites nothing is checked against the code files its excerpts came from.
     """
     files = _source_files(root)
-    seeds = list(dict.fromkeys(_cited_files(guide, files) + _configs_mentioning_paths(guide, files)))
+    cited = _cited_files(guide, files)
+    seeds = list(dict.fromkeys(cited + _scripts_for_configs(cited, files) + _configs_mentioning_paths(guide, files)))
     if not seeds:
-        seeds = list(dict.fromkeys(path for path in excerpt_paths if path in files))
+        seeds = cited = list(dict.fromkeys(path for path in excerpt_paths if path in files))
     loaded: list[LoadedFile] = []
-    for path in _follow_imports(seeds, files):
+    for path in _follow_imports(seeds, cited, files):
         text = _read(files[path])
         cut = text[:MAX_VERIFY_CHARS_PER_FILE] + TRUNCATED_NOTE if len(text) > MAX_VERIFY_CHARS_PER_FILE else text
         loaded.append(LoadedFile(path, cut))

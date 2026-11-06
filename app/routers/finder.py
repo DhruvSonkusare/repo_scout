@@ -130,6 +130,7 @@ def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> Probl
         # The model factory raises this when a setting is missing from .env.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
     result.problem_guide = guide.guide
+    result.guide_verification = guide.verification_record()
     db.commit()
     return ProblemGuideOut(
         result_id=result.id,

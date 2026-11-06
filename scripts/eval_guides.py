@@ -24,7 +24,11 @@ IMAGES_ONLY = re.compile(
     r"|\bpdfs?\b.{0,40}\b(rejected|unsupported|not (accepted|supported))\b",
     re.I,
 )
-VERDICT =re.compile(r"## Does it solve your problem\?\s*\**\s*(Fully|Partly|No)\b", re.I)
+SAVES_IMAGES = re.compile(r"\.save\(|\b(sav(e|es|ing)|writ(e|es|ing)|export(s|ing)?)\b.{0,60}\b(images?|png|jpe?g|pages?)\b", re.I)
+_WEIGHTS = r"\b(models?|weights?|checkpoints?)\b"
+MODEL_DOWNLOAD = re.compile(rf"\bdownload\w*\b.{{0,80}}{_WEIGHTS}|{_WEIGHTS}.{{0,80}}\bdownload\w*\b|snapshot_download", re.I)
+DOUBT = re.compile(r"not confirmed|unconfirmed|(can't|cannot) confirm|(doesn't|does not|may not) exist|not found|missing", re.I)
+VERDICT = re.compile(r"## Does it solve your problem\?\s*\**\s*(Fully|Partly|No)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -82,12 +86,27 @@ def never_points_table_parsing_at_a_pdf(guide: str) -> bool:
 
 
 def paddleocr_paths_in_the_right_config(guide: str) -> bool:
-    """Fail if PaddleOCR is placed in table_parsing.yaml, or its paths are named without configs/ocr.yaml."""
+    """Fail if PaddleOCR is placed in table_parsing.yaml, or discussed without naming configs/ocr.yaml."""
     wrong_file = any(
         "table_parsing.yaml" in part and "paddleocr" in part.lower() and not NEGATION.search(part)
         for part in sentences(guide)
     )
-    return not wrong_file and ("models/OCR/PaddleOCR" not in guide or "configs/ocr.yaml" in guide)
+    return not wrong_file and ("paddleocr" not in guide.lower() or "configs/ocr.yaml" in guide)
+
+
+def saves_pages_as_image_files(guide: str) -> bool:
+    """Pass if the guide says to save pages as files, because the table model opens images by path."""
+    return any(SAVES_IMAGES.search(part) for part in sentences(guide))
+
+
+def includes_the_model_download(guide: str) -> bool:
+    """Pass if the guide says to download the model weights, because the config expects them on disk."""
+    return any(MODEL_DOWNLOAD.search(part) for part in sentences(guide))
+
+
+def trusts_that_the_cpu_requirements_exist(guide: str) -> bool:
+    """Fail if the guide casts doubt on requirements-cpu.txt, which is in the repo."""
+    return not any("requirements-cpu.txt" in part and DOUBT.search(part) for part in sentences(guide))
 
 
 CASES = [
@@ -99,7 +118,10 @@ CASES = [
             Fact("verdict is Partly, or says the input must be images", partly_or_images_only),
             Fact("names the accepted input formats: png, jpg, jpeg", names_image_formats),
             Fact("doesn't say to point table parsing at a PDF", never_points_table_parsing_at_a_pdf),
-            Fact("PaddleOCR paths are in configs/ocr.yaml, not table_parsing.yaml", paddleocr_paths_in_the_right_config),
+            Fact("if PaddleOCR is discussed, names configs/ocr.yaml and not table_parsing.yaml", paddleocr_paths_in_the_right_config),
+            Fact("says to save pages as image files first", saves_pages_as_image_files),
+            Fact("includes the model download", includes_the_model_download),
+            Fact("doesn't doubt requirements-cpu.txt", trusts_that_the_cpu_requirements_exist),
         ],
     ),
 ]
