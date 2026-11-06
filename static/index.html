@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RepoGuide</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/styles/github-dark.min.css"
+        integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">RepoGuide</span>
+    <nav class="tabs" role="tablist" aria-label="Main">
+      <button class="tab active" id="tab-find" role="tab" aria-selected="true" aria-controls="find-page">Find a repo</button>
+      <button class="tab" id="tab-repos" role="tab" aria-selected="false" aria-controls="repos-page">My repos</button>
+    </nav>
+  </header>
+  <p class="banner" id="health-banner" role="alert" hidden></p>
+
+  <div class="page" id="find-page" role="tabpanel" aria-labelledby="tab-find">
+    <aside class="sidebar">
+      <h2>Past searches</h2>
+      <ul class="side-list" id="search-history"></ul>
+      <p class="empty" id="search-history-empty" hidden>Your searches will appear here.</p>
+    </aside>
+
+    <main class="content">
+      <section id="search-view">
+        <form id="search-form">
+          <label class="big-label" for="problem">Describe your problem in plain English</label>
+          <textarea id="problem" rows="4" minlength="3" maxlength="2000" required
+                    placeholder="I need to extract tables from scanned PDFs in Python"></textarea>
+          <div class="chips" id="example-chips" aria-label="Examples"></div>
+          <div class="form-row">
+            <button class="button primary" id="search-button" type="submit">Find repos</button>
+          </div>
+        </form>
+        <ol class="progress-steps" id="search-steps" aria-live="polite" hidden></ol>
+        <div id="search-skeleton" aria-hidden="true" hidden></div>
+        <p class="error" id="search-error" role="alert" hidden></p>
+      </section>
+
+      <section id="results-view" hidden>
+        <div class="pinned">
+          <div class="pinned-text">
+            <span class="pinned-label">Results for:</span>
+            <span id="results-problem"></span>
+          </div>
+          <button class="button" id="new-search" type="button">New search</button>
+        </div>
+        <p class="plan-note" id="results-plan"></p>
+        <div id="results-list"></div>
+      </section>
+
+      <section id="solution-view" hidden>
+        <div class="pinned solution-header">
+          <div class="pinned-text">
+            <span class="pinned-label">Your problem:</span>
+            <span id="solution-problem"></span>
+            <div class="solution-repo">
+              <a id="solution-repo-link" target="_blank" rel="noopener noreferrer"></a>
+              <span class="badge" id="solution-verdict" hidden></span>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="button" id="back-to-results" type="button">Back to results</button>
+            <button class="button" id="ask-follow-up" type="button" hidden>Ask a follow-up about this repo</button>
+            <button class="button" id="regenerate-guide" type="button" hidden>Write again</button>
+          </div>
+        </div>
+        <p class="status" id="solution-status" aria-live="polite" hidden></p>
+        <div class="progress" id="solution-progress" role="progressbar" aria-label="Indexing progress" hidden><div class="progress-bar"></div></div>
+        <div class="error-box" id="solution-error" role="alert" hidden>
+          <p id="solution-error-text"></p>
+          <button class="button" id="solution-retry" type="button">Index again and retry</button>
+        </div>
+        <details class="check-panel" id="verification" hidden>
+          <summary id="verification-summary"></summary>
+          <div id="verification-body"></div>
+        </details>
+        <article class="markdown" id="solution-guide"></article>
+      </section>
+    </main>
+  </div>
+
+  <div class="page" id="repos-page" role="tabpanel" aria-labelledby="tab-repos" hidden>
+    <aside class="sidebar">
+      <h2>Repos</h2>
+      <form id="add-repo-form" class="add-repo">
+        <label class="visually-hidden" for="repo-url">Add GitHub URL</label>
+        <input id="repo-url" type="url" required placeholder="https://github.com/owner/repo">
+        <button class="button primary" type="submit">Add</button>
+      </form>
+      <p class="error" id="add-repo-error" role="alert" hidden></p>
+      <ul class="side-list" id="repo-list"></ul>
+      <p class="empty" id="repo-list-empty" hidden>Add a public GitHub repo to get started.</p>
+    </aside>
+
+    <main class="content" id="repo-main">
+      <p class="empty" id="no-repo-selected">Choose a repo, or add one.</p>
+      <div id="repo-view" hidden>
+        <div class="repo-header">
+          <div>
+            <a class="repo-name" id="repo-title" target="_blank" rel="noopener noreferrer"></a>
+            <p class="repo-meta" id="repo-meta"></p>
+          </div>
+          <div class="button-row">
+            <button class="button" id="reindex-repo" type="button">Index again</button>
+            <button class="button danger" id="delete-repo" type="button">Delete</button>
+          </div>
+        </div>
+        <div class="progress" id="repo-progress" role="progressbar" aria-label="Indexing progress" hidden><div class="progress-bar"></div></div>
+        <p class="error" id="repo-error" role="alert" hidden></p>
+
+        <div class="subtabs" role="tablist" aria-label="Repo">
+          <button class="subtab active" id="subtab-chat" role="tab" aria-selected="true" aria-controls="chat-panel">Chat</button>
+          <button class="subtab" id="subtab-guide" role="tab" aria-selected="false" aria-controls="guide-panel">Onboarding guide</button>
+        </div>
+
+        <section id="chat-panel" role="tabpanel" aria-labelledby="subtab-chat">
+          <div class="conversation-bar">
+            <label class="visually-hidden" for="conversation-select">Conversation</label>
+            <select id="conversation-select"></select>
+            <button class="button" id="new-chat" type="button">New chat</button>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <form class="ask-form" id="ask-form">
+            <label class="visually-hidden" for="question">Your question</label>
+            <textarea id="question" rows="2" maxlength="4000" required placeholder="Where is authentication handled?"></textarea>
+            <button class="button primary" id="ask-button" type="submit">Ask</button>
+          </form>
+        </section>
+
+        <section id="guide-panel" role="tabpanel" aria-labelledby="subtab-guide" hidden>
+          <div class="button-row guide-actions">
+            <button class="button primary" id="generate-onboarding" type="button">Write the guide</button>
+          </div>
+          <p class="status" id="onboarding-status" aria-live="polite" hidden></p>
+          <p class="error" id="onboarding-error" role="alert" hidden></p>
+          <article class="markdown" id="onboarding-guide"></article>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="drawer" aria-label="File viewer" hidden>
+    <div class="drawer-header">
+      <span class="drawer-path" id="drawer-path"></span>
+      <button class="button" id="drawer-close" type="button" aria-label="Close file viewer">Close</button>
+    </div>
+    <p class="error" id="drawer-error" role="alert" hidden></p>
+    <div class="code-lines" id="drawer-lines"></div>
+  </aside>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
+          integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js"
+          integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/highlight.min.js"
+          integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix" crossorigin="anonymous"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -319,8 +319,8 @@ original problem, gives numbered how-to steps for that exact problem and cites r
 
 ### Step 11: UI ⭐
 **Prompt**
-> Build the frontend in `static/` (index.html, style.css, app.js; vanilla JS, `marked` and
-> `highlight.js` from CDN; clean dark developer-tool look; responsive). Layout:
+> Build the frontend in `static/` (index.html, style.css, app.js; vanilla JS, `marked`, `highlight.js` and
+> `DOMPurify` from CDN, because rendered Markdown is untrusted; clean dark developer-tool look; responsive). Layout:
 > - Top nav with two tabs: **Find a repo** and **My repos**.
 > - **Find a repo**: a big textarea "Describe your problem in plain English", example chips,
 >   a loading state with steps ("Planning search… Searching GitHub… Ranking…"), result cards
@@ -380,6 +380,46 @@ Pick 1–2:
 - Add a GitHub Actions CI job with a `postgres:16` service container.
 - Add **token/cost tracking** per request (LangChain callbacks), shown in the UI.
 - Record a 60-second demo GIF for the README and LinkedIn.
+
+---
+
+## Known gaps
+
+Things we know aren't solved. Each was found by checking real output, not by guessing.
+
+**Frontend**
+- The search progress steps follow a timer, because the API answers a search in one response.
+- The full browser flow has only run with fake models and a fake GitHub. Real guides have only been displayed.
+- There are no automated browser tests in the repo, because Playwright isn't part of the stack.
+
+**Problem guides (found by reading the guide for result 28 against opendatalab/PDF-Extract-Kit)**
+- Verification improves guides but doesn't make them correct. It turned a wrong "Fully" into "Partly" and
+  kept the setup steps, yet the final guide still has errors the verifier had the code to catch:
+  - It says results are saved to the output path, but `struct_eqtable.py` never uses `result_path`.
+  - It offers `load_pdf_images` as a route, but that returns PIL images and the model calls `Image.open(path)`.
+  - No step saves PDF pages as image files, although the model needs file paths.
+  - It lists `.jpg/.png` and leaves out `.jpeg`.
+  - It suggests `requirements-cpu.txt`, while the same guide notes that this model asserts CUDA is available.
+- Guides don't say whether a whole page works as input. The README describes "table images", so a scanned page
+  may need cropping first, for example with `layout_detection`. Nobody has tested this, and the eval has no fact for it.
+- Nobody has run a generated guide's steps. All checks so far compare text with code.
+- The file ranking in `app/finder/source_context.py` (shared path words, inherited rank) was tuned on this one repo.
+  Other repos may rank their important files below the 15-file limit.
+- Only Python imports are followed. In other languages, only cited files and configs get checked.
+- The rule against removing setup steps is a prompt instruction, not something code enforces.
+- `scripts/eval_guides.py` has one case and uses keyword checks. It has already needed two fixes for wrong
+  results, so read a guide as well as running it.
+
+**Repo Finder**
+- Reranker batches are scored in separate calls, so scores from different batches are less directly comparable.
+- The broader retry (fewer than 8 candidates) has only run against fakes.
+- Search requests read up to 20 READMEs each, which uses up GitHub's anonymous limit fast without `GITHUB_TOKEN`.
+
+**Runtime**
+- A hang seen once when closing a per-request event loop (`TestClient` without `with`, on Windows) was never
+  reproduced, so the clean shutdown work can't be called its cure. Real Ctrl+C has exited cleanly in every test since.
+- The `ClientResponse.json was never awaited` warning is filtered rather than fixed. The report is drafted in
+  `docs/upstream-langchain-issue.md` and hasn't been filed.
 
 ---
 

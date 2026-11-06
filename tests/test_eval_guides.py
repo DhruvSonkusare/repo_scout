@@ -80,6 +80,10 @@ def test_only_some_formats_fails_the_format_fact() -> None:
     assert results("It reads PNG and JPG files.")[FACT_NAMES[1]] is False
 
 
+def test_pointing_at_images_of_pdf_pages_is_fine() -> None:
+    assert results("Set `inputs` to a directory containing images of your PDF pages.")[FACT_NAMES[2]] is True
+
+
 def test_saying_not_to_pass_a_pdf_is_fine() -> None:
     assert results("Don't point it at a PDF, as it would be rejected.")[FACT_NAMES[2]] is True
 

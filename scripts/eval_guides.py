@@ -81,6 +81,8 @@ def never_points_table_parsing_at_a_pdf(guide: str) -> bool:
         re.search(r"\bpdfs?\b", part, re.I)
         and re.search(r"\b(point|set|input|inputs|pass|give)\b", part, re.I)
         and not NEGATION.search(part)
+        # "a directory containing images of your PDF pages" is the right advice, not a PDF as input.
+        and not re.search(r"\bimages? of\b", part, re.I)
         for part in sentences(guide)
     )
 

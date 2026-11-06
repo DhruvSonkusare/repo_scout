@@ -44,7 +44,8 @@ tests and a good README matter as much as features.
 - **Chroma** persistent vector store (`data/chroma/`), one collection per repo
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
-  (no build step). Use `marked` + `highlight.js` from a CDN for Markdown/code.
+  (no build step). Use `marked` + `highlight.js` from a CDN for Markdown/code, and `DOMPurify` on every
+  rendered Markdown string, because model replies and repo text are untrusted.
 - Tests: **pytest** + FastAPI `TestClient`, with fake LLM/embeddings (no API key needed).
   Tests run against the real `repoguide_test` Postgres database, never SQLite, because we use JSONB.
   `pytest.ini` limits collection to `tests/`, because collecting `data/repos/` would run cloned repos' code.

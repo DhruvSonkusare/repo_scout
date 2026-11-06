@@ -5,9 +5,11 @@ import logging
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -18,6 +20,8 @@ from app.llm import close_models, model_chain_problem, validate_model_chains
 from app.routers import chat, finder, guide, repos
 
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 def ignore_known_warnings() -> None:
@@ -59,6 +63,13 @@ app.include_router(repos.router)
 app.include_router(chat.router)
 app.include_router(guide.router)
 app.include_router(finder.router)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    """Serve the frontend."""
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/api/health")
