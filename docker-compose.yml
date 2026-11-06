@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    image: pgvector/pgvector:pg16-trixie
     environment:
       POSTGRES_USER: repoguide
       POSTGRES_PASSWORD: repoguide
@@ -17,5 +17,29 @@ services:
       timeout: 5s
       retries: 10
 
+  # The deployed image, for trying it locally: docker compose --profile app up --build
+  # Plain `docker compose up -d db` still starts only the database.
+  app:
+    profiles: [app]
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://repoguide:repoguide@db:5432/repoguide
+      PORT: "8000"
+      DEMO_MODE: "false"
+      EMBEDDING_PROVIDER: gemini
+      EMBEDDING_MODEL: gemini-embedding-001
+      DATA_DIR: /app/data
+    ports:
+      - "8000:8000"
+    volumes:
+      - appdata:/app/data
+
 volumes:
   pgdata:
+  appdata:

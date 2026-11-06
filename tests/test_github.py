@@ -157,7 +157,7 @@ def test_requests_send_githubs_headers() -> None:
     headers = requests[0].headers
     assert headers["accept"] == "application/vnd.github+json"
     assert headers["x-github-api-version"] == "2022-11-28"
-    assert headers["user-agent"] == "RepoGuide"
+    assert headers["user-agent"] == "RepoScout"
 
 
 def test_no_token_sends_no_authorization_header() -> None:

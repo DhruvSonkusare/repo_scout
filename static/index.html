@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RepoGuide</title>
+  <title>RepoScout</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/styles/github-dark.min.css"
         integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
@@ -11,13 +11,14 @@
 </head>
 <body>
   <header class="topbar">
-    <span class="brand">RepoGuide</span>
+    <span class="brand">RepoScout</span>
     <nav class="tabs" role="tablist" aria-label="Main">
       <button class="tab active" id="tab-find" role="tab" aria-selected="true" aria-controls="find-page">Find a repo</button>
       <button class="tab" id="tab-repos" role="tab" aria-selected="false" aria-controls="repos-page">My repos</button>
     </nav>
   </header>
   <p class="banner" id="health-banner" role="alert" hidden></p>
+  <p class="banner notice" id="demo-banner" hidden>Public demo: searches and chats are visible to everyone, so don't enter anything private.</p>
 
   <div class="page" id="find-page" role="tabpanel" aria-labelledby="tab-find">
     <aside class="sidebar">
@@ -154,6 +155,19 @@
     <p class="error" id="drawer-error" role="alert" hidden></p>
     <div class="code-lines" id="drawer-lines"></div>
   </aside>
+
+  <dialog class="password-dialog" id="password-dialog" aria-labelledby="password-title">
+    <form method="dialog" id="password-form">
+      <h3 id="password-title">Index password needed</h3>
+      <p id="password-message"></p>
+      <label class="visually-hidden" for="index-password">Index password</label>
+      <input id="index-password" type="password" autocomplete="off" placeholder="Index password">
+      <div class="button-row dialog-actions">
+        <button class="button" id="password-cancel" type="button">Cancel</button>
+        <button class="button primary" value="submit" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 

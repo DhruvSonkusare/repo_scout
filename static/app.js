@@ -160,8 +160,27 @@ function errorMessage(body, status) {
   return `The server returned an error (HTTP ${status}).`;
 }
 
+let indexPassword = "";
+
+/** Ask for the demo's index password. Resolves to true if the user gave one. */
+function askIndexPassword(message) {
+  const dialog = $("password-dialog");
+  $("password-message").textContent = message;
+  $("index-password").value = "";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => {
+      const given = dialog.returnValue === "submit" && $("index-password").value !== "";
+      if (given) indexPassword = $("index-password").value;
+      resolve(given);
+    }, { once: true });
+    dialog.returnValue = "";
+    dialog.showModal();
+  });
+}
+
 async function api(path, options = {}) {
   const init = { method: options.method || "GET", headers: {} };
+  if (indexPassword && init.method !== "GET") init.headers["X-Index-Password"] = indexPassword;
   if (options.body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(options.body);
@@ -174,6 +193,11 @@ async function api(path, options = {}) {
   }
   if (response.status === 204) return null;
   const body = await response.json().catch(() => null);
+  // Only the demo's index password answers 401. A wrong one lands back here and asks again.
+  if (response.status === 401) {
+    indexPassword = "";
+    if (await askIndexPassword(errorMessage(body, response.status))) return api(path, options);
+  }
   if (!response.ok) throw new ApiError(errorMessage(body, response.status), response.status);
   return body;
 }
@@ -981,6 +1005,15 @@ async function askFollowUp() {
   $("question").focus();
 }
 
+async function showDemoNotice() {
+  try {
+    const config = await api("/api/config");
+    $("demo-banner").hidden = !config.demo_mode;
+  } catch {
+    // The health check reports a server that can't be reached.
+  }
+}
+
 async function checkHealth() {
   try {
     const response = await fetch("/api/health");
@@ -1034,6 +1067,7 @@ function init() {
       $("ask-form").requestSubmit();
     }
   });
+  $("password-cancel").addEventListener("click", () => $("password-dialog").close("cancel"));
   $("drawer-close").addEventListener("click", closeDrawer);
   $("drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (event) => {
@@ -1041,6 +1075,7 @@ function init() {
   });
 
   checkHealth();
+  showDemoNotice();
   loadSearchHistory();
 }
 

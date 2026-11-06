@@ -47,7 +47,8 @@ os.environ["DATA_DIR"] = str(TEST_ROOT / "data")
 from app.config import get_settings  # noqa: E402
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.ingest import remove_clone  # noqa: E402
-from app.llm import FAKE_CHAT_RESPONSES, _gemini_models, _unknown_models, circuit_breaker  # noqa: E402
+from app.demo import rate_limiter  # noqa: E402
+from app.llm import FAKE_CHAT_RESPONSES, _gemini_embeddings, _gemini_models, _unknown_models, circuit_breaker  # noqa: E402
 
 SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 
@@ -56,7 +57,6 @@ SAMPLE_REPO = PROJECT_ROOT / "tests" / "fixtures" / "sample_repo"
 def remove_test_root() -> Iterator[None]:
     """Delete the temporary data folder after the test session."""
     yield
-    # Chroma can keep its files open until the process exits, so this can't always finish.
     shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
 
@@ -75,7 +75,9 @@ def migrated_database(alembic_config: Config) -> None:
 @pytest.fixture(autouse=True)
 def clean_tables(migrated_database: None) -> None:
     """Start each test with empty tables and ids counting from 1."""
-    tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
+    # PGVector's tables aren't our models, but a stale vector would turn up in a later test's search.
+    names = [table.name for table in Base.metadata.sorted_tables] + ["langchain_pg_embedding", "langchain_pg_collection"]
+    tables = ", ".join(names)
     with engine.begin() as connection:
         connection.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
 
@@ -86,6 +88,8 @@ def every_model_usable() -> None:
     circuit_breaker.reset()
     _unknown_models.clear()
     _gemini_models.clear()
+    _gemini_embeddings.clear()
+    rate_limiter.reset()
 
 
 @pytest.fixture
@@ -108,7 +112,7 @@ def cloned_urls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Replace git clone with a copy of the sample repo, and record the URLs it was asked for."""
     urls: list[str] = []
 
-    def copy_sample(url: str, repo_id: int) -> Path:
+    def copy_sample(url: str, repo_id: int, commit: str | None = None) -> Path:
         urls.append(url)
         remove_clone(repo_id)
         destination = get_settings().repos_dir / str(repo_id)

@@ -58,7 +58,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await close_models()
 
 
-app = FastAPI(title="RepoGuide", lifespan=lifespan)
+app = FastAPI(title="RepoScout", lifespan=lifespan)
 app.include_router(repos.router)
 app.include_router(chat.router)
 app.include_router(guide.router)
@@ -72,6 +72,12 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/config")
+def public_config() -> dict[str, bool]:
+    """Tell the frontend what it needs to know about this deployment."""
+    return {"demo_mode": get_settings().demo_mode}
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     """Report whether the database is reachable and the model chains can run, and which LLM provider is in use."""
@@ -80,7 +86,8 @@ def health() -> JSONResponse:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except SQLAlchemyError as exc:
-        db = str(getattr(exc, "orig", exc)).strip()
+        # A connection error can name the database host and user, which a public demo shouldn't show.
+        db = "unavailable" if get_settings().demo_mode else str(getattr(exc, "orig", exc)).strip()
     models = model_chain_problem() or "ok"
     is_ok = db == "ok" and models == "ok"
     return JSONResponse(

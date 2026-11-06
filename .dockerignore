@@ -1,0 +1,17 @@
+# The Dockerfile copies only what it names, and this keeps the rest out of the build context.
+.env
+.env.*
+.git
+.venv
+venv
+data
+tests
+docs
+scripts
+__pycache__
+*.py[cod]
+.claude
+.vscode
+.pytest_cache
+.coverage
+htmlcov

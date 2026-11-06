@@ -3,7 +3,7 @@
     Switch a venv to the NVIDIA GPU build of local embeddings, on Windows.
 
 .DESCRIPTION
-    pip can't do this in one step. chromadb requires the CPU onnxruntime, which shares a folder with
+    pip can't do this in one step. A CPU onnxruntime left in the venv shares a folder with
     onnxruntime-gpu and overwrites it, so embeddings would silently stay on the CPU. Stop the server
     first, because Windows won't let pip replace a DLL that's in use.
 
@@ -44,4 +44,4 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Installed, but CUDA isn't available. Check the NVIDIA driver with nvidia-smi." -ForegroundColor Red
     exit 1
 }
-Write-Host "Done: onnxruntime can use CUDA. pip check will say chromadb requires onnxruntime; that's expected." -ForegroundColor Green
+Write-Host "Done: onnxruntime can use CUDA." -ForegroundColor Green

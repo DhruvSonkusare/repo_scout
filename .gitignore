@@ -12,7 +12,7 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Runtime data (cloned repos, Chroma index)
+# Runtime data (cloned repos, downloaded embedding models)
 data/
 
 

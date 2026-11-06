@@ -1,19 +1,20 @@
-"""API and background indexing tests, on real Postgres and real Chroma in a temporary folder."""
+"""API and background indexing tests, on real Postgres with pgvector, and clones in a temporary folder."""
 
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from sqlalchemy import select
+from langchain_postgres.vectorstores import _get_embedding_collection_store
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db import Repo
+from app.db import Repo, engine
 from app.ingest import CloneError
 from app.main import app
-from app.vectorstore import _get_client, delete_collection, get_vectorstore
+from app.vectorstore import delete_collection, get_vectorstore
 from tests.conftest import FakeGemini
 
 pytestmark = pytest.mark.usefixtures("fresh_settings", "cloned_urls")
@@ -38,7 +39,12 @@ def use_small_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def collection_count(repo_id: int) -> int:
     """Count the vectors stored for a repo."""
-    return get_vectorstore(repo_id)._collection.count()
+    query = text(
+        "SELECT count(*) FROM langchain_pg_embedding e JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+        "WHERE c.name = :name"
+    )
+    with engine.connect() as connection:
+        return connection.scalar(query, {"name": f"repo_{repo_id}"})
 
 
 # --- adding repos
@@ -391,7 +397,10 @@ def test_delete_removes_the_row_clone_and_vectors() -> None:
     assert response.status_code == 204
     assert client.get(f"/api/repos/{repo['id']}").status_code == 404
     assert not clone.exists()
-    assert f"repo_{repo['id']}" not in [collection.name for collection in _get_client().list_collections()]
+    with engine.connect() as connection:
+        names = connection.scalars(text("SELECT name FROM langchain_pg_collection")).all()
+    assert f"repo_{repo['id']}" not in names
+    assert collection_count(repo["id"]) == 0
 
 
 def test_delete_collection_ignores_a_missing_collection() -> None:
@@ -404,9 +413,44 @@ def test_delete_collection_ignores_a_missing_collection() -> None:
 def test_collection_uses_cosine_similarity() -> None:
     repo = add_repo()
 
-    collection = _get_client().get_collection(f"repo_{repo['id']}")
+    assert get_vectorstore(repo["id"])._distance_strategy.value == "cosine"
 
-    assert collection.configuration["hnsw"]["space"] == "cosine"
+
+def test_migration_tables_match_what_langchain_postgres_expects() -> None:
+    # A newer langchain-postgres could change its tables, and create_all wouldn't update ours.
+    embedding_store, collection_store = _get_embedding_collection_store(None)
+    inspector = inspect(engine)
+
+    for model in (embedding_store, collection_store):
+        columns = {column["name"] for column in inspector.get_columns(model.__tablename__)}
+        assert columns == set(model.__table__.columns.keys())
+
+
+def test_a_nul_character_in_a_file_does_not_break_indexing(cloned_urls: list[str]) -> None:
+    repo = add_repo()
+    (get_settings().repos_dir / str(repo["id"]) / "src" / "app.py").write_text("x = 1\x00\n", encoding="utf-8")
+
+    def keep_the_changed_clone(url: str, repo_id: int, commit: str | None = None) -> Path:
+        return get_settings().repos_dir / str(repo_id)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("app.ingest.clone_repo", keep_the_changed_clone)
+        client.post(f"/api/repos/{repo['id']}/reindex")
+
+    assert client.get(f"/api/repos/{repo['id']}").json()["status"] == "ready"
+
+
+def test_each_collection_can_use_its_own_vector_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    small = get_vectorstore(901)
+    small.embedding_function = DeterministicFakeEmbedding(size=4)
+    large = get_vectorstore(902)
+    large.embedding_function = DeterministicFakeEmbedding(size=8)
+
+    small.add_texts(["a"], metadatas=[{"path": "a"}])
+    large.add_texts(["b"], metadatas=[{"path": "b"}])
+
+    assert small.similarity_search("a", k=5)[0].page_content == "a"
+    assert large.similarity_search("b", k=5)[0].page_content == "b"
 
 
 def test_stored_chunks_keep_their_citation_metadata() -> None:

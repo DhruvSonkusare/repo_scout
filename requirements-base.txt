@@ -1,4 +1,5 @@
-# Shared by requirements.txt (CPU) and requirements-gpu.txt (NVIDIA GPU). Install one of those, not this.
+# What the app needs to run. The Docker image installs only this, with Gemini embeddings and no FastEmbed.
+# requirements.txt (CPU) and requirements-gpu.txt (NVIDIA GPU) add local embeddings and the tests. Install one of those, not this.
 fastapi
 uvicorn[standard]
 sqlalchemy>=2
@@ -13,8 +14,6 @@ langchain-text-splitters
 # 4.4 at least, for ChatGoogleGenerativeAI.aclose(), which server shutdown calls.
 langchain-google-genai>=4.4
 google-genai
-langchain-chroma
-chromadb
+langchain-postgres
+pgvector
 python-dotenv
-pytest
-pytest-cov

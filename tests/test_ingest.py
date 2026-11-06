@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from langchain_text_splitters import Language
 
+from app.config import get_settings
 from app.ingest import (
     LANGUAGE_BY_SUFFIX,
     CloneError,
@@ -394,3 +395,49 @@ def test_build_file_tree_is_not_marked_truncated_when_it_fits(tmp_path: Path) ->
 
     assert len(lines) == 299
     assert "... (truncated)" not in lines
+
+
+# --- restoring a clone that's gone
+
+
+def make_origin(path: Path) -> tuple[list[str], str]:
+    """Create a repo to clone from, and return the git prefix and its first commit."""
+    git = ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    path.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+    (path / "file.py").write_text("first\n", encoding="utf-8")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "--quiet", "-m", "first"], check=True)
+    first = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, encoding="utf-8").stdout.strip()
+    (path / "file.py").write_text("second\n", encoding="utf-8")
+    subprocess.run([*git, "commit", "--quiet", "-am", "second"], check=True)
+    return git, first
+
+
+def test_a_clone_can_be_restored_at_the_indexed_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    origin = tmp_path / "origin"
+    git, first = make_origin(origin)
+    # GitHub allows fetching any commit, while a local repo needs telling to.
+    subprocess.run([*git, "config", "uploadpack.allowAnySHA1InWant", "true"], check=True)
+
+    clone = clone_repo(origin.as_uri(), repo_id=5, commit=first)
+
+    assert (clone / "file.py").read_text(encoding="utf-8") == "first\n"
+    get_settings.cache_clear()
+
+
+def test_a_commit_that_is_gone_falls_back_to_the_latest_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    origin = tmp_path / "origin"
+    make_origin(origin)
+
+    clone = clone_repo(origin.as_uri(), repo_id=5, commit="0" * 40)
+
+    assert (clone / "file.py").read_text(encoding="utf-8") == "second\n"
+    assert "Couldn't restore commit" in caplog.text
+    get_settings.cache_clear()

@@ -1,10 +1,10 @@
-# RepoGuide — project context for Claude Code
+# RepoScout — project context for Claude Code
 
 ## What we are building
-RepoGuide is an AI developer assistant with two features:
+RepoScout is an AI developer assistant with two features:
 
 1. **Repo Finder** — the user describes a problem in plain English
-   ("I need to extract tables from scanned PDFs in Python"). RepoGuide searches GitHub,
+   ("I need to extract tables from scanned PDFs in Python"). RepoScout searches GitHub,
    ranks the best open-source repos for that problem, explains why each fits, and
    generates a "how to solve your problem with this repo" guide.
 2. **Codebase Q&A** — the user indexes any public GitHub repo, then asks questions
@@ -16,20 +16,20 @@ tests and a good README matter as much as features.
 
 ## Tech stack (do not change without asking)
 - Python 3.11+, **FastAPI**, Uvicorn
-- **PostgreSQL 16** running in Docker (`docker-compose.yml`, service `db`), connected with
+- **PostgreSQL 16 with pgvector** running in Docker (`docker-compose.yml`, service `db`), connected with
   **SQLAlchemy 2.0** (typed `Mapped[...]` style) and the **psycopg 3** driver
   (`postgresql+psycopg://...`). JSON fields use `JSONB`, timestamps use `DateTime(timezone=True)`.
 - **Alembic** for schema migrations. Never use `create_all()` in the app; every model
   change gets a new migration (`alembic revision --autogenerate -m "..."`).
 - **LangChain** (`langchain-core`, `langchain-text-splitters`, `langchain-google-genai`,
-  `langchain-chroma`) with **Google Gemini** for chat and **FastEmbed** for embeddings, running locally by
+  `langchain-postgres`) with **Google Gemini** for chat and **FastEmbed** for embeddings, running locally by
   default (`EMBEDDING_PROVIDER`: `local` | `gemini` | `fake`; `EMBEDDING_MODEL` picks the model). The default
   model is `jinaai/jina-embeddings-v2-base-code`. Gemini embeddings stay available, but the free tier's
   1,000 texts a day is too low to index most repos.
 - Local embeddings use `EMBEDDING_DEVICE` (`auto` | `cuda` | `cpu`). `requirements.txt` is the CPU build, for
   Docker and machines without a GPU. `requirements-gpu.txt` adds CUDA through `fastembed-gpu`. The two builds
-  conflict, so a venv has one or the other. Install the GPU build with `scripts/install_gpu.ps1`, because
-  `chromadb` otherwise pulls the CPU `onnxruntime` over it. `auto` falls back to the CPU with a log line.
+  conflict, so a venv has one or the other. Install the GPU build with `scripts/install_gpu.ps1`, because a
+  leftover CPU `onnxruntime` would replace it. `auto` falls back to the CPU with a log line.
 - `CHAT_MODELS` and `GUIDE_MODELS` are comma-separated fallback chains, built with `.with_fallbacks()` in
   `app/llm.py`. Only a 404, 429, 500, 503 or 504 moves to the next model, never a 400, and only before the first
   streamed token. An in-memory circuit breaker skips a model until midnight Pacific after a daily-quota error, for
@@ -41,7 +41,13 @@ tests and a good README matter as much as features.
 - `CHAT_THINKING_LEVEL` (default `minimal`) and `GUIDE_THINKING_LEVEL` (default `low`) set how much Gemini reasons
   before answering (`default` | `minimal` | `low` | `medium` | `high`): a `thinking_level` for Gemini 3, a
   `thinking_budget` for 2.5, nothing for Gemma. `default` sends nothing.
-- **Chroma** persistent vector store (`data/chroma/`), one collection per repo
+- **pgvector** through `langchain-postgres`'s `PGVector`, one collection per repo, in the same database. Alembic owns
+  its tables. Its async methods need an async engine, so `retrieve()` runs the sync ones in a worker thread.
+- **Deployment:** Render's free web service (about 512 MB) from the `Dockerfile`, with Neon Postgres, Gemini embeddings
+  (`gemini-embedding-001`) and `DEMO_MODE=true`. See `docs/DEPLOY.md`. The image installs only `requirements-base.txt`,
+  so FastEmbed and ONNX Runtime are imported only inside the functions that use local embeddings. Local development
+  keeps the local Jina/GPU setup. `DATABASE_URL` stays local, and only `scripts/index_demo_repos.py` reads
+  `NEON_DATABASE_URL`.
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
   (no build step). Use `marked` + `highlight.js` from a CDN for Markdown/code, and `DOMPurify` on every
@@ -62,7 +68,8 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
     llm.py           # get_chat_model() / get_guide_model() / get_structured_model() /
                      # get_structured_guide_model() (gemini | fake)
                      # get_embeddings() (local | gemini | fake)
-    vectorstore.py   # Chroma helpers
+    vectorstore.py   # pgvector helpers
+    demo.py          # the public demo's limits: index password, rate limits, daily cap, repo size
     ingest.py        # clone + split + index a repo
     rag.py           # Q&A chain + onboarding guide chain
     finder/
@@ -75,10 +82,13 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
   tests/
   alembic/           # migrations
   alembic.ini
-  docker-compose.yml # postgres (+ app later)
+  Dockerfile         # the deployed image
+  render.yaml        # Render Blueprint
+  docker-compose.yml # postgres with pgvector, plus the app under the `app` profile
   docker/            # init-test-db.sql (creates repoguide_test)
-  scripts/           # manual helpers, e.g. smoke_llm.py, eval_guides.py
-  data/              # runtime data (cloned repos, Chroma index), git-ignored
+  scripts/           # manual helpers, e.g. smoke_llm.py, eval_guides.py, index_demo_repos.py
+  docs/              # DEPLOY.md, upstream-langchain-issue.md
+  data/              # runtime data (cloned repos, downloaded embedding models), git-ignored
 ```
 
 ## Conventions
@@ -94,7 +104,10 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
 - Long jobs (cloning/indexing) run in FastAPI `BackgroundTasks` and update a `status` column.
 - Dev server: `uvicorn app.main:app --reload --reload-dir app`. Plain `--reload` also watches
   `data/`, so a clone restarts the server and kills the indexing job.
-- Secrets only in `.env` (never committed). Provide `.env.example`.
+- Secrets only in `.env` (never committed) or the host's environment settings. Provide `.env.example`.
+- Clones can disappear (free hosts wipe their disks), so anything reading files from a repo's clone calls
+  `ensure_clone_or_503()` first, which restores it at the indexed commit.
+- The app is called RepoScout, but the local database and Docker names stay `repoguide`, so existing data keeps working.
 - Type hints everywhere, short docstrings, no unused code.
 - After each step: run `pytest -q`, then summarise what changed.
 

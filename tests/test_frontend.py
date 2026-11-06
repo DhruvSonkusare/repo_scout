@@ -19,7 +19,7 @@ def test_the_page_is_served_at_the_root() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
-    assert "RepoGuide" in response.text
+    assert "RepoScout" in response.text
     assert "/static/app.js" in response.text
     assert "/static/style.css" in response.text
 
@@ -115,3 +115,14 @@ def test_reduced_motion_turns_animation_off() -> None:
     assert "animation: none !important" in block
     assert "transition: none !important" in block
     assert "prefers-reduced-motion: reduce" in APP_JS
+
+
+def test_config_tells_the_frontend_about_demo_mode() -> None:
+    assert client.get("/api/config").json() == {"demo_mode": False}
+
+
+def test_enter_in_the_password_box_submits_it_rather_than_cancelling() -> None:
+    # Pressing Enter in a form uses its first submit button, so Cancel mustn't be one.
+    dialog = INDEX_HTML.split('id="password-dialog"')[1].split("</dialog>")[0]
+
+    assert re.findall(r'<button[^>]*type="submit"[^>]*>([^<]+)<', dialog) == ["Continue"]

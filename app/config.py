@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
+    # A small pool suits Neon's connection limits, and hosted Postgres can take a while to wake up.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=5, ge=0)
+    db_connect_timeout_seconds: int = Field(default=5, ge=1)
     data_dir: Path = Path("./data")
 
     llm_provider: Literal["gemini", "fake"] = "gemini"
@@ -52,6 +56,30 @@ class Settings(BaseSettings):
     max_files: int = 1500
     max_file_bytes: int = 200_000
 
+    # The public demo. Off by default, and turned on by the Dockerfile. See app/demo.py.
+    demo_mode: bool = False
+    # Needed in demo mode to add, re-index or delete repos. Empty turns those off entirely.
+    index_password: SecretStr = SecretStr("")
+    max_repo_size_mb: int = Field(default=20, ge=1)
+    # Gemini's free tier allows 1,000 embedded texts a day, so one repo can't be allowed to use them all.
+    max_index_chunks: int = Field(default=400, ge=1)
+    rate_limit_search_per_hour: int = Field(default=10, ge=1)
+    rate_limit_ask_per_hour: int = Field(default=30, ge=1)
+    rate_limit_guide_per_hour: int = Field(default=5, ge=1)
+    rate_limit_index_per_hour: int = Field(default=10, ge=1)
+    daily_request_cap: int = Field(default=100, ge=1)
+    # The header a reverse proxy puts the real client IP in. Empty means there's no proxy.
+    client_ip_header: str = ""
+
+    @field_validator("database_url")
+    @classmethod
+    def use_the_psycopg_driver(cls, value: str) -> str:
+        """Accept the URLs that hosts hand out, such as Neon's postgresql://, and select psycopg 3."""
+        for prefix in ("postgresql://", "postgres://"):
+            if value.startswith(prefix):
+                return "postgresql+psycopg://" + value.removeprefix(prefix)
+        return value
+
     @field_validator("chat_models", "guide_models", mode="before")
     @classmethod
     def split_model_list(cls, value: Any) -> Any:
@@ -70,16 +98,10 @@ class Settings(BaseSettings):
         """Where cloned repos are stored."""
         return self.data_dir / "repos"
 
-    @property
-    def chroma_dir(self) -> Path:
-        """Where the Chroma index is stored."""
-        return self.data_dir / "chroma"
-
 
 @lru_cache
 def get_settings() -> Settings:
     """Return one shared Settings instance, creating its data directories."""
     settings = Settings()
     settings.repos_dir.mkdir(parents=True, exist_ok=True)
-    settings.chroma_dir.mkdir(parents=True, exist_ok=True)
     return settings

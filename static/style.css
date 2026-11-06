@@ -153,6 +153,23 @@ h2 {
 .tab:hover, .subtab:hover, .tab.active, .subtab.active { color: var(--text); }
 .tab.active::after, .subtab.active::after { transform: scaleX(1); }
 .banner { margin: 0; padding: var(--space-2) var(--space-5); background: #3a2020; color: #ffd5d2; }
+.banner.notice { background: var(--panel-raised); color: var(--muted); font-size: var(--text-sm); border-bottom: 1px solid var(--line); }
+
+/* Asks for the index password in the public demo */
+.password-dialog {
+  width: min(420px, calc(100vw - 2 * var(--space-4)));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  padding: var(--space-4);
+}
+.password-dialog[open] { animation: enter var(--normal) var(--ease) backwards; }
+.password-dialog::backdrop { background: var(--backdrop); }
+.password-dialog h3 { font-size: var(--text-md); margin: 0 0 var(--space-2); }
+.password-dialog p { color: var(--muted); font-size: var(--text-base); margin: 0 0 var(--space-3); }
+.dialog-actions { justify-content: flex-end; margin-top: var(--space-3); }
 
 /* Page layout */
 .page { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); min-height: calc(100vh - var(--topbar-height)); }

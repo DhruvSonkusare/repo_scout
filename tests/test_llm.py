@@ -65,8 +65,8 @@ def local_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
     monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
     monkeypatch.setenv("EMBEDDING_MODEL", "")
     monkeypatch.setenv("EMBEDDING_DEVICE", "auto")
-    monkeypatch.setattr("app.llm.TextEmbedding", StubTextEmbedding)
-    monkeypatch.setattr("app.llm.ort.get_available_providers", lambda: [CUDA_PROVIDER, CPU_PROVIDER])
+    monkeypatch.setattr("fastembed.TextEmbedding", StubTextEmbedding)
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: [CUDA_PROVIDER, CPU_PROVIDER])
     monkeypatch.setattr(StubTextEmbedding, "session_provider", CUDA_PROVIDER)
     monkeypatch.setattr(StubTextEmbedding, "load_error", None)
     monkeypatch.setattr(StubTextEmbedding, "loads", [])
@@ -236,7 +236,7 @@ def test_cpu_device_never_tries_cuda(local_env: pytest.MonkeyPatch, caplog: pyte
 def break_cuda(env: pytest.MonkeyPatch, how: str) -> None:
     """Make CUDA unusable in one of the ways it can fail."""
     if how == "not_in_this_install":
-        env.setattr("app.llm.ort.get_available_providers", lambda: [CPU_PROVIDER])
+        env.setattr("onnxruntime.get_available_providers", lambda: [CPU_PROVIDER])
     elif how == "silently_fell_back_to_cpu":
         env.setattr(StubTextEmbedding, "session_provider", CPU_PROVIDER)
     else:

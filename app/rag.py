@@ -146,7 +146,9 @@ async def retrieve(repo_id: int, question: str) -> list[Document]:
         search_type="mmr",
         search_kwargs={"k": get_settings().retrieval_k, "fetch_k": MMR_FETCH_K, "lambda_mult": MMR_LAMBDA},
     )
-    return await retriever.ainvoke(question)
+    # The store runs on the app's normal (sync) engine, so its async methods aren't available.
+    # A worker thread keeps the event loop free while the search runs.
+    return await asyncio.to_thread(retriever.invoke, question)
 
 
 def read_readme(root: Path) -> str:

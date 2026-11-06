@@ -3,10 +3,11 @@
 # Don't install this file directly. Stop the server, then run:
 #   powershell -ExecutionPolicy Bypass -File scripts\install_gpu.ps1
 #
-# pip can't do this in one step: chromadb requires the CPU onnxruntime, which shares a folder with
+# pip can't do this in one step: a CPU onnxruntime left in the venv shares a folder with
 # onnxruntime-gpu and overwrites it, so embeddings would silently stay on the CPU. Afterwards, `pip check`
-# reports "chromadb requires onnxruntime, which is not installed". That's expected: onnxruntime-gpu provides
-# the same module. Run the script again after any install that brings the CPU build back.
+# Run the script again after any install that brings the CPU build back.
 -r requirements-base.txt
 fastembed-gpu
 onnxruntime-gpu[cuda,cudnn]
+pytest
+pytest-cov

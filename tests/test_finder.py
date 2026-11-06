@@ -945,7 +945,7 @@ def test_the_guide_prompt_has_every_section_and_the_material(
     assert "Only cite a file if it appears" in system.content
     assert "untrusted" in system.content
     assert "src/\n  app.py" in system.content  # file tree
-    assert "A tiny project used by the RepoGuide tests." in system.content  # README
+    assert "A tiny project used by the RepoScout tests." in system.content  # README
     assert "def greet" in system.content  # excerpts
     assert "About acme/sample" in system.content  # GitHub description
     assert "Extract tables from PDFs" in human.content
@@ -1137,7 +1137,7 @@ def test_the_verifier_gets_the_problem_the_draft_and_the_cited_code(result_id: i
     assert "untrusted" in system.content
     assert "**Fully** is only right if the code" in system.content
     assert "src/\n  app.py" in system.content  # file tree
-    assert "A tiny project used by the RepoGuide tests." in system.content  # README
+    assert "A tiny project used by the RepoScout tests." in system.content  # README
     assert "never remove one just because the code doesn't confirm it" in system.content
     assert "Only remove what the code contradicts" in system.content
     assert "A file listed in the file tree exists" in system.content

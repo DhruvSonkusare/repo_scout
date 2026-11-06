@@ -1,4 +1,4 @@
-# RepoGuide — step-by-step build plan (for Claude Code)
+# RepoScout — step-by-step build plan (for Claude Code)
 
 **How to use this file**
 1. The project root is this folder (`d:\github_repo_guide`), which holds `CLAUDE.md` and
@@ -12,6 +12,10 @@
 Estimated total: 4–6 focused days.
 
 ---
+
+**Changes since this plan was written:** the app is now called RepoScout, and vectors moved from Chroma to pgvector
+(`langchain-postgres`), so read "Chroma" in the steps below as pgvector. Deployment is on Render with Neon: see
+`docs/DEPLOY.md`.
 
 ## Reference: data model
 
@@ -387,6 +391,15 @@ Pick 1–2:
 
 Things we know aren't solved. Each was found by checking real output, not by guessing.
 
+**Deployment**
+- Which header gives the real client IP on Render is unverified, because sources disagree. `docs/DEPLOY.md` has a
+  check to run once deployed, and the daily cap protects the quota either way.
+- Gemini embeddings on the deployed path haven't run against the real API yet, only a local fake.
+- A repo added on the demo is limited by its GitHub-reported size and chunk count, but not by how much memory its
+  clone and split take on a 512 MB instance. The defaults are small to leave room.
+- Visitors can see each other's searches and chats. The page says so, but there's no per-visitor privacy.
+- Vector searches scan a repo's vectors with no index, because the column has no fixed size. That's fine for small repos.
+
 **Frontend**
 - The search progress steps follow a timer, because the API answers a search in one response.
 - The full browser flow has only run with fake models and a fake GitHub. Real guides have only been displayed.
@@ -424,7 +437,7 @@ Things we know aren't solved. Each was found by checking real output, not by gue
 ---
 
 ## Resume bullets (fill in your real numbers at the end)
-- Built **RepoGuide**, an AI developer assistant that finds open-source repos for a problem
+- Built **RepoScout**, an AI developer assistant that finds open-source repos for a problem
   described in plain English and answers questions about any GitHub codebase with
   file- and line-level citations (FastAPI, LangChain, Gemini, FastEmbed, PostgreSQL, SQLAlchemy, Alembic, Chroma, Docker).
 - Designed a RAG pipeline with language-aware code chunking, MMR retrieval and

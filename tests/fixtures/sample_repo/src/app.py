@@ -1,4 +1,4 @@
-"""A small program for the RepoGuide tests."""
+"""A small program for the RepoScout tests."""
 
 
 def greet(name: str) -> str:

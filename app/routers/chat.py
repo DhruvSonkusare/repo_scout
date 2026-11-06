@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Conversation, Message, Repo, get_db
+from app.demo import limit
 from app.llm import embedding_identity
 from app.rag import MAX_HISTORY_MESSAGES, stream_answer, to_chat_history
 from app.schemas import AskRequest, ConversationOut, MessageOut
@@ -28,7 +29,7 @@ def require_searchable(repo: Repo) -> None:
         )
 
 
-@router.post("/api/repos/{repo_id}/ask")
+@router.post("/api/repos/{repo_id}/ask", dependencies=[Depends(limit("ask"))])
 def ask(repo_id: int, body: AskRequest, db: Session = Depends(get_db)) -> StreamingResponse:
     """Stream an answer as NDJSON. Problems found before streaming starts return normal HTTP errors."""
     repo = db.get(Repo, repo_id)

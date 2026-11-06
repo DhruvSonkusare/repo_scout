@@ -2,13 +2,14 @@
 
 import asyncio
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response, status
 from langchain_core.exceptions import OutputParserException
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Repo, Search, SearchResult, SessionLocal, get_db
+from app.demo import limit
 from app.finder.chains import (
     Candidate,
     RepoResult,
@@ -21,7 +22,7 @@ from app.finder.github import GitHubError, GitHubRateLimitError
 from app.ingest import index_repo
 from app.llm import GEMINI_ERRORS, ModelSetupError, describe_gemini_error
 from app.routers.chat import require_searchable
-from app.routers.repos import add_or_get_repo
+from app.routers.repos import add_or_get_repo, ensure_clone_or_503
 from app.schemas import GuideVerificationOut, ProblemGuideOut, RepoOut, SearchOut, SearchRequest, SearchSummaryOut
 
 router = APIRouter(prefix="/api/finder", tags=["finder"])
@@ -56,7 +57,7 @@ def _save_search(
         return SearchOut.model_validate(search)
 
 
-@router.post("/search", response_model=SearchOut, status_code=status.HTTP_201_CREATED)
+@router.post("/search", response_model=SearchOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit("search"))])
 async def search_repos(body: SearchRequest) -> SearchOut:
     """Find and rank repos for a problem. Takes a while, because it makes two LLM calls and many GitHub requests."""
     try:
@@ -100,11 +101,16 @@ def _get_result_or_404(db: Session, result_id: int) -> SearchResult:
 
 @router.post("/results/{result_id}/index", response_model=RepoOut, status_code=status.HTTP_202_ACCEPTED)
 def index_result(
-    result_id: int, background_tasks: BackgroundTasks, response: Response, db: Session = Depends(get_db)
+    result_id: int,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    response: Response,
+    x_index_password: str = Header(default=""),
+    db: Session = Depends(get_db),
 ) -> Repo:
     """Link a result to its repo and start indexing it. A repo that was already added is reused as it is."""
     result = _get_result_or_404(db, result_id)
-    repo, created = add_or_get_repo(db, result.url)
+    repo, created = add_or_get_repo(db, result.url, request, x_index_password)
     result.repo_id = repo.id
     db.commit()
     if created:
@@ -114,7 +120,7 @@ def index_result(
     return repo
 
 
-@router.post("/results/{result_id}/guide", response_model=ProblemGuideOut)
+@router.post("/results/{result_id}/guide", response_model=ProblemGuideOut, dependencies=[Depends(limit("guide"))])
 def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> ProblemGuideOut:
     """Write a guide, check it against the repo's code, and save it, replacing any earlier one. This can take a while."""
     result = _get_result_or_404(db, result_id)
@@ -122,6 +128,7 @@ def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> Probl
     if repo is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Index this result first: POST to its /index URL.")
     require_searchable(repo)
+    ensure_clone_or_503(repo)
     try:
         guide = generate_problem_guide(result.search.problem, repo, result.description)
     except GEMINI_ERRORS as error:

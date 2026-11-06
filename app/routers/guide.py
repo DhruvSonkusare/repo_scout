@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db import Repo, get_db
+from app.demo import limit
 from app.llm import GEMINI_ERRORS, describe_gemini_error
 from app.rag import generate_onboarding_guide
 from app.routers.chat import require_searchable
+from app.routers.repos import ensure_clone_or_503
 from app.schemas import GuideOut
 
 router = APIRouter(prefix="/api/repos/{repo_id}/guide", tags=["guide"])
@@ -29,11 +31,12 @@ def get_guide(repo_id: int, db: Session = Depends(get_db)) -> GuideOut:
     return GuideOut(repo_id=repo.id, guide=repo.onboarding_guide)
 
 
-@router.post("", response_model=GuideOut)
+@router.post("", response_model=GuideOut, dependencies=[Depends(limit("guide"))])
 def create_guide(repo_id: int, db: Session = Depends(get_db)) -> GuideOut:
     """Generate the guide and save it, replacing any earlier one. This can take a while."""
     repo = _get_repo_or_404(db, repo_id)
     require_searchable(repo)
+    ensure_clone_or_503(repo)
     try:
         guide = generate_onboarding_guide(repo)
     except GEMINI_ERRORS as error:

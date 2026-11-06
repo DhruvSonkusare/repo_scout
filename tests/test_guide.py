@@ -1,4 +1,4 @@
-"""Tests for the onboarding guide, with fake models, real Postgres and real Chroma."""
+"""Tests for the onboarding guide, with fake models and real Postgres with pgvector."""
 
 from pathlib import Path
 
@@ -83,7 +83,7 @@ def test_prompt_has_the_readme_tree_languages_and_excerpts(repo_id: int, recordi
     client.post(f"/api/repos/{repo_id}/guide")
 
     prompt = system_prompt(recording_model)
-    assert "A tiny project used by the RepoGuide tests." in prompt  # README
+    assert "A tiny project used by the RepoScout tests." in prompt  # README
     assert "src/\n  app.py" in prompt  # file tree
     assert "Markdown (1)" in prompt and "Python (1)" in prompt  # language stats
     assert "[1] " in prompt and "def greet" in prompt  # excerpts

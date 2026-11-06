@@ -1,3 +1,5 @@
 # Default install: local embeddings run on the CPU. Works everywhere, including Docker.
 -r requirements-base.txt
 fastembed
+pytest
+pytest-cov

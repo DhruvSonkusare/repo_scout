@@ -1,0 +1,18 @@
+# Render reads this when you create a Blueprint. Settings that aren't secrets are in the Dockerfile.
+services:
+  - type: web
+    name: reposcout
+    runtime: docker
+    plan: free
+    branch: master
+    healthCheckPath: /api/health
+    envVars:
+      # sync: false means Render asks you for the value, and it never goes in this file.
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: INDEX_PASSWORD
+        sync: false

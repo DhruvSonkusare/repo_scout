@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import subprocess
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -13,8 +14,8 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
-from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_postgres import PGVector
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -40,6 +41,10 @@ MAX_TREE_LINES = 300
 
 GITHUB_URL_PATTERN = re.compile(r"https://github\.com/([A-Za-z0-9_-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?")
 INVALID_REPO_NAMES = {".", "..", ".git"}
+# Cloning runs unattended, so a private or missing repo must fail, not wait for a login: the
+# empty helper stops Windows login pop-ups, and GIT_TERMINAL_PROMPT stops terminal prompts.
+GIT_NO_LOGIN = ["-c", "credential.helper="]
+_restore_lock = threading.Lock()
 
 SKIPPED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "bower_components", "venv", ".venv", "__pycache__",
@@ -162,13 +167,8 @@ def remove_clone(repo_id: int) -> None:
     shutil.rmtree(clone)
 
 
-def clone_repo(url: str, repo_id: int) -> Path:
-    """Shallow-clone a repo into data/repos/<repo_id>, replacing any old clone, and return that path."""
-    remove_clone(repo_id)
-    destination = get_settings().repos_dir / str(repo_id)
-    # Cloning runs unattended, so a private or missing repo must fail, not wait for a login:
-    # the env var stops terminal prompts, and the empty helper stops Windows login pop-ups.
-    command = ["git", "-c", "credential.helper=", "clone", "--depth", "1", "--", url, str(destination)]
+def _run_git(command: list[str], url: str) -> None:
+    """Run a git command that talks to a repo's server, turning failures into a CloneError."""
     try:
         subprocess.run(
             command,
@@ -187,7 +187,55 @@ def clone_repo(url: str, repo_id: int) -> Path:
         raise CloneError(f"Could not clone {url}. Is it a public repo? ({detail})") from error
     except FileNotFoundError as error:
         raise CloneError("Git is not installed or not on the PATH.") from error
+
+
+def _fetch_commit(url: str, destination: Path, commit: str) -> None:
+    """Download one commit into a new folder, without its history."""
+    _run_git(["git", "init", "--quiet", str(destination)], url)
+    _run_git(["git", "-C", str(destination), *GIT_NO_LOGIN, "fetch", "--quiet", "--depth", "1", "--", url, commit], url)
+    _run_git(["git", "-C", str(destination), "checkout", "--quiet", "FETCH_HEAD"], url)
+
+
+def clone_repo(url: str, repo_id: int, commit: str | None = None) -> Path:
+    """Shallow-clone a repo into data/repos/<repo_id>, replacing any old clone, and return that path.
+
+    With a commit, that exact commit is restored. If GitHub no longer has it, the latest code is
+    better than nothing, although citations may then point at lines that have moved.
+    """
+    remove_clone(repo_id)
+    destination = get_settings().repos_dir / str(repo_id)
+    if commit:
+        try:
+            _fetch_commit(url, destination, commit)
+            return destination
+        except CloneError as error:
+            logger.warning("Couldn't restore commit %s, so cloning the latest code instead: %s", commit, error)
+            remove_clone(repo_id)
+    _run_git(["git", *GIT_NO_LOGIN, "clone", "--depth", "1", "--", url, str(destination)], url)
     return destination
+
+
+def _current_commit(root: Path) -> str | None:
+    """Return the commit a clone is on, or None if the folder isn't a clone."""
+    if not (root / ".git").exists():
+        return None
+    result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, encoding="utf-8", errors="replace")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def ensure_clone(repo: Repo) -> Path:
+    """Return a repo's clone, restoring it first if it's gone.
+
+    Free hosts wipe their disks on every restart, and repos indexed from another machine never had
+    a clone here. Vectors survive in Postgres, but the file viewer and guides need the files. The
+    lock stops two requests restoring at once, and stops a reader seeing a half-finished clone.
+    """
+    root = get_settings().repos_dir / str(repo.id)
+    with _restore_lock:
+        if not root.is_dir():
+            logger.info("Restoring the clone of %s.", repo.name)
+            clone_repo(repo.url, repo.id, commit=repo.commit_sha)
+    return root
 
 
 def _language_for(path: Path) -> tuple[str, Language | None] | None:
@@ -264,7 +312,8 @@ def split_file(source: SourceFile) -> list[Document]:
             Document(
                 # The path helps retrieval match questions like "what does config.py do?".
                 # It's added after counting lines, so it can't shift the line numbers.
-                page_content=f"# File: {source.relative_path}\n{chunk.page_content}",
+                # Postgres text can't hold a NUL character, which some files contain.
+                page_content=f"# File: {source.relative_path}\n{chunk.page_content}".replace("\x00", ""),
                 metadata={
                     "path": source.relative_path,
                     "language": source.language,
@@ -302,7 +351,7 @@ def build_file_tree(root: Path) -> str:
     return "\n".join(lines)
 
 
-def _add_batch_with_waits(store: Chroma, batch: list[Document], repo_name: str) -> None:
+def _add_batch_with_waits(store: PGVector, batch: list[Document], repo_name: str) -> None:
     """Embed and store one batch, waiting out rate limits and temporary errors.
 
     add_documents calls the embedding model first and only stores vectors if that succeeds,
@@ -352,6 +401,18 @@ def _embed_chunks(db: Session, repo: Repo, chunks: list[Document]) -> None:
         db.commit()
 
 
+def collect_chunks(root: Path) -> tuple[list[Document], Counter[str]]:
+    """Split a clone's files into chunks, and count the files per language."""
+    chunks: list[Document] = []
+    languages: Counter[str] = Counter()
+    for source in islice(iter_source_files(root), get_settings().max_files):
+        file_chunks = split_file(source)
+        if file_chunks:
+            chunks.extend(file_chunks)
+            languages[source.language] += 1
+    return chunks, languages
+
+
 def _run_indexing(db: Session, repo: Repo) -> None:
     """Clone, split and embed a repo, moving its status through cloning, indexing and ready."""
     repo.status = "cloning"
@@ -363,18 +424,19 @@ def _run_indexing(db: Session, repo: Repo) -> None:
     db.commit()
 
     root = clone_repo(repo.url, repo.id)
+    repo.commit_sha = _current_commit(root)
     repo.status = "indexing"
     db.commit()
 
-    chunks: list[Document] = []
-    languages: Counter[str] = Counter()
-    for source in islice(iter_source_files(root), get_settings().max_files):
-        file_chunks = split_file(source)
-        if file_chunks:
-            chunks.extend(file_chunks)
-            languages[source.language] += 1
+    settings = get_settings()
+    chunks, languages = collect_chunks(root)
     if not chunks:
         raise IndexingError("This repo has no source files that can be indexed.")
+    if settings.demo_mode and len(chunks) > settings.max_index_chunks:
+        raise IndexingError(
+            f"This repo splits into {len(chunks)} chunks, and this demo's limit is {settings.max_index_chunks}, "
+            "to stay within Gemini's daily embedding quota."
+        )
 
     repo.file_count = sum(languages.values())
     repo.chunk_count = len(chunks)

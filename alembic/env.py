@@ -17,11 +17,17 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def include_name(name: str | None, type_: str, parent_names: dict) -> bool:
+    """Leave PGVector's tables out of autogenerate. They aren't our models, so it would try to drop them."""
+    return not (type_ == "table" and name is not None and name.startswith("langchain_pg_"))
+
+
 def run_migrations_offline() -> None:
     """Write the migration SQL to stdout without connecting to a database."""
     context.configure(
         url=get_settings().database_url,
         target_metadata=target_metadata,
+        include_name=include_name,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -33,7 +39,7 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations on the app's own engine, so there is only one database URL."""
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata, include_name=include_name)
 
         with context.begin_transaction():
             context.run_migrations()

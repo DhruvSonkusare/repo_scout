@@ -1,6 +1,6 @@
 # Sample repo
 
-A tiny project used by the RepoGuide tests.
+A tiny project used by the RepoScout tests.
 
 ## Usage
 

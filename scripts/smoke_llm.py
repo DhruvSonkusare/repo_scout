@@ -20,7 +20,7 @@ def main() -> None:
         reply = get_chat_model().invoke("Say hello in 5 words")
         print(f"Chat reply: {reply.text}")
 
-        vector = get_embeddings().embed_query("RepoGuide finds open-source repos for your problem.")
+        vector = get_embeddings().embed_query("RepoScout finds open-source repos for your problem.")
         print(f"Embedding vector length: {len(vector)}")
     except ValueError as error:
         # The model factory raises this when a setting is missing from .env.

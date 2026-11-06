@@ -1,4 +1,4 @@
-"""Tests for streamed answers and conversations, with fake models, real Postgres and real Chroma."""
+"""Tests for streamed answers and conversations, with fake models and real Postgres with pgvector."""
 
 import asyncio
 import json
@@ -428,7 +428,7 @@ def test_retrieval_uses_mmr_tuned_towards_relevance(monkeypatch: pytest.MonkeyPa
     requested: dict[str, Any] = {}
 
     class StubRetriever:
-        async def ainvoke(self, question: str) -> list[Document]:
+        def invoke(self, question: str) -> list[Document]:
             return []
 
     class StubStore:

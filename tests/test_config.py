@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 pytestmark = pytest.mark.usefixtures("fresh_settings")
 
@@ -16,7 +16,6 @@ def test_get_settings_creates_data_directories(monkeypatch: pytest.MonkeyPatch, 
 
     assert settings.repos_dir == tmp_path / "data" / "repos"
     assert settings.repos_dir.is_dir()
-    assert settings.chroma_dir.is_dir()
 
 
 def test_pytest_cannot_collect_cloned_repos(pytestconfig: pytest.Config) -> None:
@@ -39,3 +38,23 @@ def test_indexing_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert settings.retrieval_k == 6
     assert settings.max_files == 1500
     assert settings.max_file_bytes == 200_000
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://user:secret@host.neon.tech/db?sslmode=require",
+        "postgres://user:secret@host.neon.tech/db?sslmode=require",
+        "postgresql+psycopg://user:secret@host.neon.tech/db?sslmode=require",
+    ],
+)
+def test_host_database_urls_use_psycopg_and_keep_ssl(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    assert get_settings().database_url == "postgresql+psycopg://user:secret@host.neon.tech/db?sslmode=require"
+
+
+def test_demo_mode_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+
+    assert Settings(_env_file=None).demo_mode is False

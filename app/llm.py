@@ -9,12 +9,10 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, time as clock_time, timedelta
 from functools import lru_cache, partial
-from typing import Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 from zoneinfo import ZoneInfo
 
 import httpx
-import onnxruntime as ort
-from fastembed import TextEmbedding
 from google.genai import Client
 from google.genai.errors import APIError
 from google.genai.types import HttpOptions, HttpRetryOptions
@@ -27,6 +25,11 @@ from langchain_google_genai._common import GoogleGenerativeAIError
 from pydantic import BaseModel
 
 from app.config import Settings, ThinkingLevel, get_settings
+
+# FastEmbed and ONNX Runtime take a lot of memory, and the deployed app doesn't install them.
+# So they're only imported by the functions that use local embeddings.
+if TYPE_CHECKING:
+    from fastembed import TextEmbedding
 
 logger = logging.getLogger(__name__)
 
@@ -345,8 +348,10 @@ class _ChainLink(Runnable[LanguageModelInput, Any]):
 
 
 # Each model holds a Google client with open connections, so keep one per set of options instead of
-# one per request. That saves about 0.5 s per client, and leaves a known list to close at shutdown.
+# one per request. That saves about 0.5 s per client and some memory, and leaves a known list to
+# close at shutdown.
 _gemini_models: dict[tuple[str, int, ThinkingLevel], ChatGoogleGenerativeAI] = {}
+_gemini_embeddings: dict[tuple[str, int], GoogleGenerativeAIEmbeddings] = {}
 
 
 def _fake_chat_model(name: str) -> BaseChatModel:
@@ -377,6 +382,9 @@ def _build_chat_model(name: str, is_last: bool, thinking_level: ThinkingLevel) -
 
 async def close_models() -> None:
     """Close every Google client, for server shutdown. A failure or a slow close can't block the exit."""
+    for embeddings in _gemini_embeddings.values():
+        embeddings.client.close()
+    _gemini_embeddings.clear()
     models = list(_gemini_models.values())
     _gemini_models.clear()
     for model in models:
@@ -554,12 +562,15 @@ class CudaUnavailableError(RuntimeError):
     """CUDA can't be used for local embeddings. The message says why."""
 
 
-def _load_on_cuda(model_name: str, cache_dir: str) -> TextEmbedding:
+def _load_on_cuda(model_name: str, cache_dir: str) -> "TextEmbedding":
     """Load a model on the GPU, or raise CudaUnavailableError.
 
     ONNX Runtime falls back to the CPU silently if CUDA fails to start, so this checks which
     provider the loaded session really uses.
     """
+    import onnxruntime as ort
+    from fastembed import TextEmbedding
+
     # On Windows, this finds the CUDA DLLs that requirements-gpu.txt installs through pip.
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
@@ -574,8 +585,10 @@ def _load_on_cuda(model_name: str, cache_dir: str) -> TextEmbedding:
     return text_embedding
 
 
-def _load_text_embedding(model_name: str, cache_dir: str, device: str) -> TextEmbedding:
+def _load_text_embedding(model_name: str, cache_dir: str, device: str) -> "TextEmbedding":
     """Load a FastEmbed model on the requested device, and log which one it really uses."""
+    from fastembed import TextEmbedding
+
     if device != "cpu":
         try:
             text_embedding = _load_on_cuda(model_name, cache_dir)
@@ -598,7 +611,7 @@ class LocalEmbeddings(Embeddings):
     Always using the right one means a model that does treat them differently still works here.
     """
 
-    def __init__(self, model_name: str, model: TextEmbedding) -> None:
+    def __init__(self, model_name: str, model: "TextEmbedding") -> None:
         self.model_name = model_name
         self.model = model
 
@@ -618,6 +631,8 @@ def _local_embeddings(model_name: str, cache_dir: str, device: str) -> LocalEmbe
     FastEmbed runs the model on this machine with ONNX Runtime, so there's no API key, quota or
     per-request cost. The first use downloads the model into cache_dir.
     """
+    from fastembed import TextEmbedding
+
     supported_models = {model["model"].lower() for model in TextEmbedding.list_supported_models()}
     if model_name.lower() not in supported_models:
         raise ValueError(
@@ -641,14 +656,15 @@ def get_embeddings() -> Embeddings:
     if settings.embedding_provider == "local":
         return _local_embeddings(embedding_identity()[1], str(settings.fastembed_dir), settings.embedding_device)
     api_key = _gemini_api_key(settings)
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=_require_gemini_setting(settings.embedding_model, "EMBEDDING_MODEL"),
-        google_api_key=api_key,
-    )
-    # This class has no max_retries and silently ignores the argument, so it would never retry.
-    # Giving it a Google client configured with retries adds exponential backoff on 429 and 503.
-    embeddings.client = Client(
-        api_key=api_key,
-        http_options=HttpOptions(retry_options=HttpRetryOptions(attempts=settings.max_retries + 1)),
-    )
-    return embeddings
+    model = _require_gemini_setting(settings.embedding_model, "EMBEDDING_MODEL")
+    key = (model, settings.max_retries)
+    if key not in _gemini_embeddings:
+        embeddings = GoogleGenerativeAIEmbeddings(model=model, google_api_key=api_key)
+        # This class has no max_retries and silently ignores the argument, so it would never retry.
+        # Giving it a Google client configured with retries adds exponential backoff on 429 and 503.
+        embeddings.client = Client(
+            api_key=api_key,
+            http_options=HttpOptions(retry_options=HttpRetryOptions(attempts=settings.max_retries + 1)),
+        )
+        _gemini_embeddings[key] = embeddings
+    return _gemini_embeddings[key]

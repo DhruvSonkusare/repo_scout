@@ -1,22 +1,30 @@
 """Database engine, session factory, ORM models and the get_db dependency."""
 
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, MetaData, String, Text, create_engine, func, text
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, MetaData, String, Text, create_engine, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from app.config import get_settings
 
+POOL_RECYCLE_SECONDS = 300
+
 # create_engine doesn't connect yet: it opens connections when they're first needed.
 # On Windows, psycopg waits out the timeout even when the connection is refused, and
 # its default is 130s per address, so keep it short to fail fast when Postgres is down.
+# Neon closes idle connections when it suspends: pool_pre_ping notices one that has died,
+# and pool_recycle replaces connections before they get that old.
+_settings = get_settings()
 engine = create_engine(
-    get_settings().database_url,
+    _settings.database_url,
     pool_pre_ping=True,
-    connect_args={"connect_timeout": 5},
+    pool_size=_settings.db_pool_size,
+    max_overflow=_settings.db_max_overflow,
+    pool_recycle=POOL_RECYCLE_SECONDS,
+    connect_args={"connect_timeout": _settings.db_connect_timeout_seconds},
 )
 SessionLocal = sessionmaker(bind=engine)
 
@@ -58,6 +66,8 @@ class Repo(Base):
     embedding_model: Mapped[str | None] = mapped_column(Text)
     languages: Mapped[dict[str, int]] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
     onboarding_guide: Mapped[str | None] = mapped_column(Text)
+    # The commit that was indexed, so a lost clone can come back with the same line numbers.
+    commit_sha: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # passive_deletes leaves child rows to the database's ON DELETE CASCADE,
@@ -145,6 +155,15 @@ class SearchResult(Base):
 
     search: Mapped[Search] = relationship(back_populates="results")
     repo: Mapped[Repo | None] = relationship()
+
+
+class DailyUsage(Base):
+    """How many limited requests the public demo has handled on one day (UTC)."""
+
+    __tablename__ = "daily_usage"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer)
 
 
 def get_db() -> Iterator[Session]:
