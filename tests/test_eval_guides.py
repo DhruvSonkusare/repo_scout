@@ -8,6 +8,8 @@ from scripts.eval_guides import CASES, evaluate, main, verdict_of
 
 CASE = CASES[0]
 FACT_NAMES = [fact.name for fact in CASE.facts]
+# A full guide from before verification existed, kept as a permanent bad example.
+BEFORE_FIX_GUIDE = Path(__file__).parent / "fixtures" / "guides" / "pdf-extract-kit-before.md"
 
 # The parts of the real guide that were wrong, word for word. The code rejects PDFs in this step.
 MISLEADING_GUIDE = """## Does it solve your problem?
@@ -44,6 +46,10 @@ def test_the_case_covers_the_facts_we_checked_by_hand() -> None:
 
 def test_the_misleading_guide_fails_every_fact() -> None:
     assert list(results(MISLEADING_GUIDE).values()) == [False, False, False, False]
+
+
+def test_the_real_guide_that_misled_us_fails_every_fact() -> None:
+    assert list(results(BEFORE_FIX_GUIDE.read_text(encoding="utf-8")).values()) == [False, False, False, False]
 
 
 def test_a_correct_guide_passes_every_fact() -> None:
