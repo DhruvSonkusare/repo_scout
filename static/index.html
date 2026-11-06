@@ -16,6 +16,15 @@
       <button class="tab active" id="tab-find" role="tab" aria-selected="true" aria-controls="find-page">Find a repo</button>
       <button class="tab" id="tab-repos" role="tab" aria-selected="false" aria-controls="repos-page">My repos</button>
     </nav>
+    <div class="account">
+      <span class="space-label" id="space-label" hidden></span>
+      <a class="button" id="sign-in" href="/auth/github/login" hidden>Sign in with GitHub</a>
+      <div class="user-menu" id="user-menu" hidden>
+        <img class="avatar" id="user-avatar" alt="" width="24" height="24" referrerpolicy="no-referrer">
+        <span class="user-login" id="user-login"></span>
+        <button class="button" id="sign-out" type="button">Sign out</button>
+      </div>
+    </div>
   </header>
   <p class="banner" id="health-banner" role="alert" hidden></p>
   <p class="banner notice" id="demo-banner" hidden>Public demo: searches and chats are visible to everyone, so don't enter anything private.</p>

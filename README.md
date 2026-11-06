@@ -4,7 +4,7 @@ An AI developer assistant that finds open-source repos for a problem described i
 questions about any public GitHub codebase with file and line citations.
 
 This project is under construction. The full README comes in a later step. To run the public demo on Render
-with Neon Postgres, see [docs/DEPLOY.md](docs/DEPLOY.md).
+with Neon Postgres, and to turn on the optional Sign in with GitHub, see [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Notes
 

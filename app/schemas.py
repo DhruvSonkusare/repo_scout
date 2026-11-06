@@ -28,7 +28,23 @@ class RepoOut(BaseModel):
     embedding_provider: str | None
     embedding_model: str | None
     languages: dict[str, int]
+    is_public: bool
     created_at: datetime
+
+
+class UserOut(BaseModel):
+    """A signed-in user's public GitHub details."""
+
+    id: int
+    login: str
+    avatar_url: str | None
+
+
+class MeOut(BaseModel):
+    """Who is signed in, if anyone, and whether this server offers signing in."""
+
+    login_enabled: bool
+    user: UserOut | None
 
 
 class RepoFileOut(BaseModel):

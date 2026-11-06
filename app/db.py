@@ -4,7 +4,20 @@ from collections.abc import Iterator
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, MetaData, String, Text, create_engine, func, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    create_engine,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -48,8 +61,20 @@ class Base(DeclarativeBase):
 IN_PROGRESS_STATUSES = ("pending", "cloning", "indexing")
 
 
+class User(Base):
+    """Someone who signed in with GitHub. Their GitHub access token is never stored."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    login: Mapped[str] = mapped_column(Text)
+    avatar_url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Repo(Base):
-    """A GitHub repository added for indexing."""
+    """A GitHub repository added for indexing. It's indexed once, and shared by everyone who adds it."""
 
     __tablename__ = "repos"
 
@@ -68,6 +93,8 @@ class Repo(Base):
     onboarding_guide: Mapped[str | None] = mapped_column(Text)
     # The commit that was indexed, so a lost clone can come back with the same line numbers.
     commit_sha: Mapped[str | None] = mapped_column(Text)
+    # Public repos are the demo's, visible to everyone. Others only appear to the users linked in user_repos.
+    is_public: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # passive_deletes leaves child rows to the database's ON DELETE CASCADE,
@@ -77,14 +104,26 @@ class Repo(Base):
     )
 
 
+class UserRepo(Base):
+    """Records that a user added a repo to their workspace."""
+
+    __tablename__ = "user_repos"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), primary_key=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Conversation(Base):
-    """A chat about one repo."""
+    """A chat about one repo. No owner means it's public."""
 
     __tablename__ = "conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(Text)
+    # CASCADE, not SET NULL: NULL means public, so deleting a user must never publish their private rows.
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     repo: Mapped[Repo] = relationship(back_populates="conversations")
@@ -111,13 +150,15 @@ class Message(Base):
 
 
 class Search(Base):
-    """A Repo Finder search for one problem statement."""
+    """A Repo Finder search for one problem statement. No owner means it's public."""
 
     __tablename__ = "searches"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     problem: Mapped[str] = mapped_column(Text)
     plan: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # CASCADE, not SET NULL: NULL means public, so deleting a user must never publish their private rows.
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Best match first, then repos the model never assessed. The id keeps equal scores in saved order.
@@ -130,12 +171,13 @@ class Search(Base):
 
 
 class SearchResult(Base):
-    """One ranked repo returned by a search."""
+    """One ranked repo returned by a search, with its guide. It has the same owner as its search."""
 
     __tablename__ = "search_results"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     search_id: Mapped[int] = mapped_column(ForeignKey("searches.id", ondelete="CASCADE"), index=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     full_name: Mapped[str] = mapped_column(Text)
     url: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
@@ -158,12 +200,25 @@ class SearchResult(Base):
 
 
 class DailyUsage(Base):
-    """How many limited requests the public demo has handled on one day (UTC)."""
+    """What the public demo has handled on one day (UTC). requests is guests, and user_* is signed-in users together."""
 
     __tablename__ = "daily_usage"
 
     day: Mapped[date] = mapped_column(Date, primary_key=True)
-    requests: Mapped[int] = mapped_column(Integer)
+    requests: Mapped[int] = mapped_column(Integer, server_default="0")
+    user_requests: Mapped[int] = mapped_column(Integer, server_default="0")
+    user_chunks: Mapped[int] = mapped_column(Integer, server_default="0")
+
+
+class UserDailyUsage(Base):
+    """What one signed-in user has used on one day (UTC)."""
+
+    __tablename__ = "user_daily_usage"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer, server_default="0")
+    indexes: Mapped[int] = mapped_column(Integer, server_default="0")
 
 
 def get_db() -> Iterator[Session]:

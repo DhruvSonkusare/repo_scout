@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 ThinkingLevel = Literal["default", "minimal", "low", "medium", "high"]
+MIN_SESSION_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -71,6 +72,19 @@ class Settings(BaseSettings):
     # The header a reverse proxy puts the real client IP in. Empty means there's no proxy.
     client_ip_header: str = ""
 
+    # Sign in with GitHub. Login appears only when all four are set, and otherwise the app is guest-only.
+    github_client_id: str = ""
+    github_client_secret: SecretStr = SecretStr("")
+    session_secret: SecretStr = SecretStr("")
+    # The address visitors use, such as https://reposcout.onrender.com. Behind a proxy the app can't work it out.
+    public_base_url: str = ""
+    # Demo limits for signed-in users. The hourly limits above apply too, counted per user instead of per IP.
+    user_daily_request_cap: int = Field(default=30, ge=1)
+    user_repos_per_day: int = Field(default=3, ge=1)
+    # Limits on all signed-in users together, so that many accounts can't use up the quota guests rely on.
+    signed_in_daily_request_cap: int = Field(default=100, ge=1)
+    signed_in_chunks_per_day: int = Field(default=400, ge=1)
+
     @field_validator("database_url")
     @classmethod
     def use_the_psycopg_driver(cls, value: str) -> str:
@@ -80,6 +94,21 @@ class Settings(BaseSettings):
                 return "postgresql+psycopg://" + value.removeprefix(prefix)
         return value
 
+    @field_validator("public_base_url")
+    @classmethod
+    def drop_trailing_slash(cls, value: str) -> str:
+        """Let callers add paths without doubling the slash."""
+        return value.rstrip("/")
+
+    @field_validator("session_secret")
+    @classmethod
+    def refuse_a_guessable_secret(cls, value: SecretStr) -> SecretStr:
+        """Anyone who guesses this secret can sign in as any user, so a short one stops the app starting."""
+        length = len(value.get_secret_value())
+        if 0 < length < MIN_SESSION_SECRET_LENGTH:
+            raise ValueError(f"SESSION_SECRET must be at least {MIN_SESSION_SECRET_LENGTH} characters.")
+        return value
+
     @field_validator("chat_models", "guide_models", mode="before")
     @classmethod
     def split_model_list(cls, value: Any) -> Any:
@@ -87,6 +116,16 @@ class Settings(BaseSettings):
         if not isinstance(value, str):
             return value
         return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+    @property
+    def login_enabled(self) -> bool:
+        """Whether Sign in with GitHub is fully configured."""
+        return bool(
+            self.github_client_id
+            and self.github_client_secret.get_secret_value()
+            and self.session_secret.get_secret_value()
+            and self.public_base_url
+        )
 
     @property
     def fastembed_dir(self) -> Path:

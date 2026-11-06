@@ -9,6 +9,8 @@ pydantic-settings>=2.7
 # Time zone data, which Windows and small Docker images lack. Daily quota resets use Pacific time.
 tzdata
 httpx
+# Signs the session cookie.
+itsdangerous
 langchain-core
 langchain-text-splitters
 # 4.4 at least, for ChatGoogleGenerativeAI.aclose(), which server shutdown calls.

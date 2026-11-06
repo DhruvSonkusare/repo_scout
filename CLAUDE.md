@@ -48,6 +48,9 @@ tests and a good README matter as much as features.
   so FastEmbed and ONNX Runtime are imported only inside the functions that use local embeddings. Local development
   keeps the local Jina/GPU setup. `DATABASE_URL` stays local, and only `scripts/index_demo_repos.py` reads
   `NEON_DATABASE_URL`.
+- **Optional GitHub login:** `app/auth.py` holds the signed session cookie (`itsdangerous`) and the access rules, and
+  `routers/auth.py` the OAuth flow. Without `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET` and
+  `PUBLIC_BASE_URL`, the app is guest-only. The GitHub access token is never stored.
 - **httpx** for the GitHub REST API
 - Frontend: plain **HTML + CSS + vanilla JS** in `static/`, served by FastAPI
   (no build step). Use `marked` + `highlight.js` from a CDN for Markdown/code, and `DOMPurify` on every
@@ -69,7 +72,8 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
                      # get_structured_guide_model() (gemini | fake)
                      # get_embeddings() (local | gemini | fake)
     vectorstore.py   # pgvector helpers
-    demo.py          # the public demo's limits: index password, rate limits, daily cap, repo size
+    auth.py          # the session cookie, current_user, and who can see what
+    demo.py          # the public demo's limits: index password, rate limits, daily caps, repo size
     ingest.py        # clone + split + index a repo
     rag.py           # Q&A chain + onboarding guide chain
     finder/
@@ -77,7 +81,7 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
       chains.py      # query planner + reranker + problem guide + its verify pass (LangChain)
       source_context.py # loads the source files a guide relies on, following Python imports
     routers/
-      repos.py  chat.py  guide.py  finder.py
+      auth.py  repos.py  chat.py  guide.py  finder.py
   static/            # index.html, style.css, app.js
   tests/
   alembic/           # migrations
@@ -108,6 +112,9 @@ The project root is this folder (`d:\github_repo_guide`), not a nested `repoguid
 - Clones can disappear (free hosts wipe their disks), so anything reading files from a repo's clone calls
   `ensure_clone_or_503()` first, which restores it at the indexed commit.
 - The app is called RepoScout, but the local database and Docker names stay `repoguide`, so existing data keeps working.
+- Every endpoint that reads or changes stored work takes `current_user` and filters by owner: `owner_user_id` NULL means
+  public, a user's rows are theirs alone, and `get_repo_or_404()` applies the repo rules. Someone else's item answers
+  404, not 403. Owner foreign keys use CASCADE, because SET NULL would publish a deleted user's private rows.
 - Type hints everywhere, short docstrings, no unused code.
 - After each step: run `pytest -q`, then summarise what changed.
 

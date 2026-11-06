@@ -40,6 +40,9 @@ os.environ["EMBEDDING_PROVIDER"] = "fake"
 # Empty lists override a developer's .env, so answers come from the one fake model by default.
 os.environ["CHAT_MODELS"] = ""
 os.environ["GUIDE_MODELS"] = ""
+# Login is off unless a test turns it on, whatever a developer's .env says.
+for name in ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "SESSION_SECRET", "PUBLIC_BASE_URL"):
+    os.environ[name] = ""
 # Clones and vectors go in a temporary folder, so tests never touch real data.
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="repoguide-tests-"))
 os.environ["DATA_DIR"] = str(TEST_ROOT / "data")

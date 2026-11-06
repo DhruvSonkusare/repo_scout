@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import IN_PROGRESS_STATUSES, Repo, SessionLocal
+from app.demo import reserve_signed_in_chunks
 from app.llm import (
     GEMINI_ERRORS,
     describe_gemini_error,
@@ -413,7 +414,7 @@ def collect_chunks(root: Path) -> tuple[list[Document], Counter[str]]:
     return chunks, languages
 
 
-def _run_indexing(db: Session, repo: Repo) -> None:
+def _run_indexing(db: Session, repo: Repo, signed_in: bool) -> None:
     """Clone, split and embed a repo, moving its status through cloning, indexing and ready."""
     repo.status = "cloning"
     repo.error = None
@@ -437,6 +438,11 @@ def _run_indexing(db: Session, repo: Repo) -> None:
             f"This repo splits into {len(chunks)} chunks, and this demo's limit is {settings.max_index_chunks}, "
             "to stay within Gemini's daily embedding quota."
         )
+    if signed_in and settings.demo_mode and not reserve_signed_in_chunks(len(chunks)):
+        raise IndexingError(
+            f"This repo splits into {len(chunks)} chunks, which is more than is left of today's indexing budget "
+            "for signed-in users. It resets at midnight UTC."
+        )
 
     repo.file_count = sum(languages.values())
     repo.chunk_count = len(chunks)
@@ -450,17 +456,18 @@ def _run_indexing(db: Session, repo: Repo) -> None:
     db.commit()
 
 
-def index_repo(repo_id: int) -> None:
+def index_repo(repo_id: int, signed_in: bool = False) -> None:
     """Background job: index a repo, and save a readable error if that fails.
 
-    It runs after the request has finished, so it opens its own database session.
+    It runs after the request has finished, so it opens its own database session. signed_in
+    charges the chunks to signed-in users' shared daily budget, which protects guests' quota.
     """
     with SessionLocal() as db:
         repo = db.get(Repo, repo_id)
         if repo is None:
             return
         try:
-            _run_indexing(db, repo)
+            _run_indexing(db, repo, signed_in)
             return
         except (CloneError, IndexingError) as error:
             message = str(error)

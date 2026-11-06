@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, can_see_repo, current_user, owned_by, owner_id
 from app.db import Repo, Search, SearchResult, SessionLocal, get_db
 from app.demo import limit
 from app.finder.chains import (
@@ -31,14 +32,15 @@ UNREADABLE_REPLY_MESSAGE = "The model's reply couldn't be read. Try the search a
 
 
 def _save_search(
-    problem: str, plan: SearchPlan, candidates: list[Candidate], assessments: list[RepoResult]
+    problem: str, plan: SearchPlan, candidates: list[Candidate], assessments: list[RepoResult], user: CurrentUser | None
 ) -> SearchOut:
-    """Save the search and its results, and return them as stored."""
+    """Save the search and its results in this user's space, and return them as stored."""
     repos = {candidate.repo.full_name: candidate.repo for candidate in candidates}
     with SessionLocal() as db:
-        search = Search(problem=problem, plan=plan.model_dump())
+        search = Search(problem=problem, plan=plan.model_dump(), owner_user_id=owner_id(user))
         search.results = [
             SearchResult(
+                owner_user_id=owner_id(user),
                 full_name=assessment.full_name,
                 url=repos[assessment.full_name].html_url,
                 description=repos[assessment.full_name].description,
@@ -58,7 +60,7 @@ def _save_search(
 
 
 @router.post("/search", response_model=SearchOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit("search"))])
-async def search_repos(body: SearchRequest) -> SearchOut:
+async def search_repos(body: SearchRequest, user: CurrentUser | None = Depends(current_user)) -> SearchOut:
     """Find and rank repos for a problem. Takes a while, because it makes two LLM calls and many GitHub requests."""
     try:
         plan, candidates = await find_repos(body.problem)
@@ -73,28 +75,28 @@ async def search_repos(body: SearchRequest) -> SearchOut:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
     except (OutputParserException, ValidationError) as error:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, UNREADABLE_REPLY_MESSAGE) from error
-    return await asyncio.to_thread(_save_search, body.problem, plan, candidates, assessments)
+    return await asyncio.to_thread(_save_search, body.problem, plan, candidates, assessments, user)
 
 
 @router.get("/searches", response_model=list[SearchSummaryOut])
-def list_searches(db: Session = Depends(get_db)) -> list[Search]:
-    """List past searches, newest first."""
-    return list(db.scalars(select(Search).order_by(Search.id.desc())))
+def list_searches(user: CurrentUser | None = Depends(current_user), db: Session = Depends(get_db)) -> list[Search]:
+    """List past searches in this user's space, newest first."""
+    return list(db.scalars(select(Search).where(owned_by(Search.owner_user_id, user)).order_by(Search.id.desc())))
 
 
 @router.get("/searches/{search_id}", response_model=SearchOut)
-def get_search(search_id: int, db: Session = Depends(get_db)) -> Search:
+def get_search(search_id: int, user: CurrentUser | None = Depends(current_user), db: Session = Depends(get_db)) -> Search:
     """Return one past search with its results, best match first."""
     search = db.get(Search, search_id)
-    if search is None:
+    if search is None or search.owner_user_id != owner_id(user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Search not found.")
     return search
 
 
-def _get_result_or_404(db: Session, result_id: int) -> SearchResult:
-    """Return a search result, or raise a 404."""
+def _get_result_or_404(db: Session, result_id: int, user: CurrentUser | None) -> SearchResult:
+    """Return a search result in this user's space, or raise a 404."""
     result = db.get(SearchResult, result_id)
-    if result is None:
+    if result is None or result.owner_user_id != owner_id(user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Search result not found.")
     return result
 
@@ -106,26 +108,29 @@ def index_result(
     request: Request,
     response: Response,
     x_index_password: str = Header(default=""),
+    user: CurrentUser | None = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Repo:
     """Link a result to its repo and start indexing it. A repo that was already added is reused as it is."""
-    result = _get_result_or_404(db, result_id)
-    repo, created = add_or_get_repo(db, result.url, request, x_index_password)
+    result = _get_result_or_404(db, result_id, user)
+    repo, created = add_or_get_repo(db, result.url, request, x_index_password, user)
     result.repo_id = repo.id
     db.commit()
     if created:
-        background_tasks.add_task(index_repo, repo.id)
+        background_tasks.add_task(index_repo, repo.id, user is not None)
     else:
         response.status_code = status.HTTP_200_OK
     return repo
 
 
 @router.post("/results/{result_id}/guide", response_model=ProblemGuideOut, dependencies=[Depends(limit("guide"))])
-def create_problem_guide(result_id: int, db: Session = Depends(get_db)) -> ProblemGuideOut:
+def create_problem_guide(
+    result_id: int, user: CurrentUser | None = Depends(current_user), db: Session = Depends(get_db)
+) -> ProblemGuideOut:
     """Write a guide, check it against the repo's code, and save it, replacing any earlier one. This can take a while."""
-    result = _get_result_or_404(db, result_id)
+    result = _get_result_or_404(db, result_id, user)
     repo = result.repo
-    if repo is None:
+    if repo is None or not can_see_repo(db, repo, user):
         raise HTTPException(status.HTTP_409_CONFLICT, "Index this result first: POST to its /index URL.")
     require_searchable(repo)
     ensure_clone_or_503(repo)

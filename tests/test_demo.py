@@ -316,7 +316,10 @@ def test_the_demo_repos_leave_room_in_the_embedding_quota() -> None:
 
 def test_secrets_are_not_baked_into_the_image_or_blueprint() -> None:
     dockerfile = read("Dockerfile")
-    for secret in ("GOOGLE_API_KEY", "GITHUB_TOKEN", "DATABASE_URL", "INDEX_PASSWORD"):
+    for secret in (
+        "GOOGLE_API_KEY", "GITHUB_TOKEN", "DATABASE_URL", "INDEX_PASSWORD",
+        "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "SESSION_SECRET", "PUBLIC_BASE_URL",
+    ):
         assert secret not in dockerfile
         assert f"key: {secret}\n        sync: false" in read("render.yaml")
     assert ".env" in read(".dockerignore")

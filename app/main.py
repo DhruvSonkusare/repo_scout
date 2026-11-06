@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.db import engine
 from app.ingest import fail_interrupted_repos
 from app.llm import close_models, model_chain_problem, validate_model_chains
-from app.routers import chat, finder, guide, repos
+from app.routers import auth, chat, finder, guide, repos
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="RepoScout", lifespan=lifespan)
+app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(chat.router)
 app.include_router(guide.router)

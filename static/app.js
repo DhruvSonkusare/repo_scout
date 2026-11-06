@@ -161,6 +161,25 @@ function errorMessage(body, status) {
 }
 
 let indexPassword = "";
+let currentUser = null;
+// Shown once after a redirect, from ?notice= in the address.
+const NOTICES = {
+  login_failed: "Signing in with GitHub didn't finish. Please try again.",
+  session_ended: "Your session ended, so you're back in the public space. Sign in again to use your workspace.",
+};
+
+/** Tell the server which account this page shows, so a request can't land in another space if the session has ended. */
+function sessionHeaders() {
+  return currentUser ? { "X-Signed-In-As": String(currentUser.id) } : {};
+}
+
+/** Throw if the page's session is over, after sending the page back to the public space. */
+function checkSessionEnded(response, message) {
+  if (response.status === 401 && response.headers.get("X-Session-Ended")) {
+    window.location.assign("/?notice=session_ended");
+    throw new ApiError(message, 401);
+  }
+}
 
 /** Ask for the demo's index password. Resolves to true if the user gave one. */
 function askIndexPassword(message) {
@@ -179,7 +198,7 @@ function askIndexPassword(message) {
 }
 
 async function api(path, options = {}) {
-  const init = { method: options.method || "GET", headers: {} };
+  const init = { method: options.method || "GET", headers: sessionHeaders() };
   if (indexPassword && init.method !== "GET") init.headers["X-Index-Password"] = indexPassword;
   if (options.body !== undefined) {
     init.headers["Content-Type"] = "application/json";
@@ -193,7 +212,8 @@ async function api(path, options = {}) {
   }
   if (response.status === 204) return null;
   const body = await response.json().catch(() => null);
-  // Only the demo's index password answers 401. A wrong one lands back here and asks again.
+  checkSessionEnded(response, errorMessage(body, response.status));
+  // Otherwise only the demo's index password answers 401. A wrong one lands back here and asks again.
   if (response.status === 401) {
     indexPassword = "";
     if (await askIndexPassword(errorMessage(body, response.status))) return api(path, options);
@@ -597,6 +617,11 @@ function repoSummary(repo) {
   return `${repo.file_count} files, ${repo.chunk_count} chunks`;
 }
 
+/** A signed-in user shares public repos with everyone, so they can read them but not change them. */
+function isSharedWithPublic(repo) {
+  return Boolean(currentUser) && repo.is_public;
+}
+
 function renderRepoHeader() {
   const repo = selectedRepo();
   $("no-repo-selected").hidden = Boolean(repo);
@@ -608,13 +633,16 @@ function renderRepoHeader() {
   const title = $("repo-title");
   title.textContent = repo.name;
   title.href = safeUrl(repo.url);
-  $("repo-meta").textContent = repoSummary(repo);
+  $("repo-meta").textContent = isSharedWithPublic(repo) ? `${repoSummary(repo)} · Public demo repo` : repoSummary(repo);
   setText("repo-error", repo.status === "failed" ? repo.error || "Indexing failed. See the server log." : "");
   const busy = IN_PROGRESS.has(repo.status);
   if (busy) showProgress("repo-progress", repo);
   else hideProgress("repo-progress");
   $("reindex-repo").disabled = busy;
   $("delete-repo").disabled = busy;
+  $("reindex-repo").hidden = isSharedWithPublic(repo);
+  $("delete-repo").hidden = isSharedWithPublic(repo);
+  $("delete-repo").textContent = currentUser ? "Remove" : "Delete";
   const ready = repo.status === "ready";
   $("ask-button").disabled = !ready || Boolean(repos.streaming);
   $("question").disabled = !ready;
@@ -799,12 +827,13 @@ async function askQuestion(event) {
   try {
     const response = await fetch(`/api/repos/${repo.id}/ask`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...sessionHeaders() },
       body: JSON.stringify({ question, conversation_id: repos.conversationId }),
       signal: controller.signal,
     });
     if (!response.ok) {
       const errorBody = await response.json().catch(() => null);
+      checkSessionEnded(response, errorMessage(errorBody, response.status));
       throw new ApiError(errorMessage(errorBody, response.status), response.status);
     }
     await readEvents(response, handleEvent);
@@ -906,12 +935,15 @@ async function reindexRepo() {
 
 async function deleteRepo() {
   const repo = selectedRepo();
-  if (!repo || !window.confirm(`Delete ${repo.name}, with its clone, index and chats?`)) return;
+  const question = currentUser
+    ? `Remove ${repo?.name} from your workspace, with your chats about it?`
+    : `Delete ${repo?.name}, with its clone, index and chats?`;
+  if (!repo || !window.confirm(question)) return;
   try {
     await api(`/api/repos/${repo.id}`, { method: "DELETE" });
     repos.selectedId = null;
     closeDrawer();
-    toast(`Deleted ${repo.name}`);
+    toast(`${currentUser ? "Removed" : "Deleted"} ${repo.name}`);
     await refreshRepos();
   } catch (error) {
     showError("repo-error", error.message);
@@ -1005,12 +1037,49 @@ async function askFollowUp() {
   $("question").focus();
 }
 
-async function showDemoNotice() {
+function renderAccount(config, me) {
+  currentUser = me.user;
+  const signedIn = Boolean(currentUser);
+  $("sign-in").hidden = !me.login_enabled || signedIn;
+  $("user-menu").hidden = !signedIn;
+  if (signedIn) {
+    $("user-avatar").src = safeUrl(currentUser.avatar_url || "");
+    $("user-login").textContent = currentUser.login;
+  }
+  const label = $("space-label");
+  label.hidden = !me.login_enabled;
+  label.textContent = signedIn ? "My workspace" : "Public";
+  label.classList.toggle("private", signedIn);
+  $("demo-banner").hidden = !config.demo_mode || signedIn;
+  if (me.login_enabled && !signedIn) $("demo-banner").append(" Sign in with GitHub for a private workspace.");
+  $("search-history-empty").textContent = signedIn ? "Your private searches will appear here." : "Your searches will appear here.";
+}
+
+/** Find out who's signed in, before anything is shown as belonging to a space. */
+async function loadAccount() {
   try {
-    const config = await api("/api/config");
-    $("demo-banner").hidden = !config.demo_mode;
+    const [config, me] = await Promise.all([api("/api/config"), api("/api/me")]);
+    renderAccount(config, me);
   } catch {
     // The health check reports a server that can't be reached.
+  }
+}
+
+async function signOut() {
+  try {
+    await api("/auth/logout", { method: "POST" });
+    window.location.assign("/");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/** Show a notice passed in the address, and remove it so a reload doesn't repeat it. */
+function showAddressNotice() {
+  const notice = NOTICES[new URLSearchParams(window.location.search).get("notice")];
+  if (notice) {
+    toast(notice, "error");
+    window.history.replaceState(null, "", "/");
   }
 }
 
@@ -1068,6 +1137,7 @@ function init() {
     }
   });
   $("password-cancel").addEventListener("click", () => $("password-dialog").close("cancel"));
+  $("sign-out").addEventListener("click", signOut);
   $("drawer-close").addEventListener("click", closeDrawer);
   $("drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (event) => {
@@ -1075,8 +1145,8 @@ function init() {
   });
 
   checkHealth();
-  showDemoNotice();
-  loadSearchHistory();
+  showAddressNotice();
+  loadAccount().then(loadSearchHistory);
 }
 
 init();

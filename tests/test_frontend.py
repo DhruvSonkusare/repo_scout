@@ -126,3 +126,19 @@ def test_enter_in_the_password_box_submits_it_rather_than_cancelling() -> None:
     dialog = INDEX_HTML.split('id="password-dialog"')[1].split("</dialog>")[0]
 
     assert re.findall(r'<button[^>]*type="submit"[^>]*>([^<]+)<', dialog) == ["Continue"]
+
+
+def test_signing_in_is_a_link_and_signing_out_is_a_post() -> None:
+    assert 'href="/auth/github/login"' in INDEX_HTML
+    assert 'api("/auth/logout", { method: "POST" })' in APP_JS
+
+
+def test_every_kind_of_request_says_which_account_the_page_shows() -> None:
+    assert 'headers: sessionHeaders()' in APP_JS
+    assert '"Content-Type": "application/json", ...sessionHeaders()' in APP_JS
+    assert APP_JS.count("checkSessionEnded(response, ") == 3  # its definition, and both kinds of request
+
+
+def test_the_page_names_both_spaces() -> None:
+    assert '"My workspace"' in APP_JS
+    assert '"Public"' in APP_JS

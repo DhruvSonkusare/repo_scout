@@ -16,3 +16,12 @@ services:
         sync: false
       - key: INDEX_PASSWORD
         sync: false
+      # Sign in with GitHub. See docs/DEPLOY.md. Without all four, the app runs guest-only.
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false

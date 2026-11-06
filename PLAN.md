@@ -397,7 +397,13 @@ Things we know aren't solved. Each was found by checking real output, not by gue
 - Gemini embeddings on the deployed path haven't run against the real API yet, only a local fake.
 - A repo added on the demo is limited by its GitHub-reported size and chunk count, but not by how much memory its
   clone and split take on a 512 MB instance. The defaults are small to leave room.
-- Visitors can see each other's searches and chats. The page says so, but there's no per-visitor privacy.
+- Guests can see each other's searches and chats. The page says so, and signing in gives a private space.
+- GitHub login has only run against a mocked GitHub, not the real one, until it's set up on Render.
+- Signing out clears the browser's cookie, but sessions aren't stored on the server, so a copied cookie keeps working for
+  up to 14 days unless `SESSION_SECRET` changes.
+- Someone adding a repo another user already added gets it back ready at once, which shows that somebody indexed it,
+  though not who. The repo itself is public on GitHub.
+- Failed indexing jobs don't return their chunks to signed-in users' daily budget.
 - Vector searches scan a repo's vectors with no index, because the column has no fixed size. That's fine for small repos.
 
 **Frontend**
